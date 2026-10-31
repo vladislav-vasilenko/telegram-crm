@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Диалоги — Telegram CRM</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="Диалоги, главная"><span class="brand-mark">↗</span><span>диалоги<span class="brand-dot">.</span><small>ЛИЧНОЕ ПРОСТРАНСТВО</small></span></a>
+    <div class="workspace"><span class="workspace-icon">Т</span><div>Мой Telegram<small id="workspace-caption">Локальная CRM</small></div><span class="workspace-chevron">⌄</span></div>
+    <p class="nav-heading">ВАШИ ПЕРЕПИСКИ</p>
+    <nav id="navigation" aria-label="Категории чатов"></nav>
+    <div class="sidebar-divider"></div>
+    <button class="nav-item" id="llm-nav" aria-label="Анализ LLM"><span data-icon="sparkles"></span><span>Анализ LLM</span><span class="new-label">20 сообщений</span></button>
+    <button class="nav-item" id="folders-nav" aria-label="Папки Telegram"><span data-icon="folder"></span><span>Папки Telegram</span></button>
+    <button class="nav-item" id="settings-nav" aria-label="Настройки"><span data-icon="settings"></span><span>Настройки</span></button>
+    <div class="sidebar-bottom"><div class="local-indicator"><span></span>Работает на вашем устройстве</div><p>Переписки остаются локально.<br>LLM получает только выбранные данные.</p><button id="connection" class="connection"><span class="telegram-icon" data-icon="send"></span><span id="connection-text">Подключить Telegram</span><span>↗</span></button></div>
+  </aside>
+
+  <main>
+    <header class="topbar"><div><span class="mobile-brand">диалоги.</span><span>Telegram</span><span class="breadcrumb-slash">/</span><strong>Обзор переписок</strong></div><div class="topbar-right"><span class="local-pill"><i></i> Локально</span><button class="icon-button" id="top-settings" aria-label="Открыть настройки" data-icon="settings"></button></div></header>
+    <div class="page">
+      <div class="page-heading"><div><div class="eyebrow">МЕНЬШЕ ШУМА. БОЛЬШЕ СМЫСЛА.</div><h1>Переписки под контролем<span>.</span></h1><p>Важные люди, забытые знакомства и чаты, которые пора разобрать.</p></div><div class="heading-actions"><button class="button subtle" id="csv-button"><span data-icon="download"></span>Экспорт</button><button class="button subtle" id="full-scan-button" title="Заново загрузить историю всех чатов, включая правки и удаления старых сообщений. Дольше обычного обновления."><span data-icon="refresh"></span>Полное обновление</button><button class="button primary" id="scan-button"><span data-icon="refresh"></span>Обновить чаты</button></div></div>
+      <div id="notice" class="notice" hidden></div>
+      <div id="job-status" class="job-status" hidden></div>
+      <section class="metrics" id="metrics" aria-label="Статистика категорий"></section>
+      <div class="section-heading"><div><h2 id="list-title">Все чаты</h2><span id="list-caption"></span></div><span class="scan-caption" id="scan-caption">Ещё не синхронизировано</span></div>
+      <section class="inbox" aria-label="Список чатов">
+        <div class="toolbar"><label class="search"><span data-icon="search"></span><input id="search" type="search" placeholder="Найти человека, чат или заметку…" aria-label="Поиск чатов"><kbd>⌘ K</kbd></label><div class="toolbar-right"><select id="kind-filter" aria-label="Тип чата"><option value="all">Все типы</option><option value="user">Личные чаты</option><option value="group">Группы</option><option value="channel">Каналы</option><option value="bot">Боты</option></select><select id="sort" aria-label="Сортировка"><option value="priority">По частоте общения</option><option value="oldest">Сначала старые</option><option value="newest">Сначала новые</option><option value="name">По имени</option></select></div></div>
+        <div class="quick-filters"><button id="select-remaining" class="quick-button"><span data-icon="sparkles"></span>Выбрать остальные для LLM</button><select id="category-filter" aria-label="Категория"><option value="all">Все чаты</option><option value="important">Важные</option><option value="stalled">Без развития</option><option value="suspected_scam">Подозрительные</option><option value="inactive">Неактивные</option><option value="very_old">Очень старые</option><option value="dead">Мёртвые</option></select><span>Категории могут пересекаться</span></div>
+        <div id="batch-bar" class="batch-bar" hidden><div><strong id="selection-count"></strong><button class="text-button" id="clear-selection">Снять выбор</button></div><div><button class="button small" id="copy-batch"><span data-icon="copy"></span>Копировать по 20 сообщений</button><button class="button small" id="import-batch"><span data-icon="upload"></span>Импорт ответа</button><button class="button small dark" id="analyze-batch"><span data-icon="sparkles"></span>Анализ LLM</button></div></div>
+        <div class="table-wrap"><table><thead><tr><th class="check-cell"><input id="select-all" type="checkbox" aria-label="Выбрать показанные чаты (до 50)"></th><th>ЧАТ / СОБЕСЕДНИК</th><th>СТАТУС</th><th>ПОСЛЕДНИЙ КОНТАКТ</th><th class="frequency-column">ОБЩЕНИЕ ЗА 30 ДНЕЙ</th><th class="row-arrow"></th></tr></thead><tbody id="chat-rows"></tbody></table></div>
+        <div id="empty-state" class="empty-state" hidden></div>
+        <div class="table-footer"><span id="table-count"></span><span>Дата и время · Москва (UTC+3)</span></div>
+      </section>
+      <div class="bottom-note"><span data-icon="info"></span><span>Каждая метка объяснима. «Подозрение» и «Знакомство» можно проверить и исправить вручную.</span></div>
+    </div>
+  </main>
+  <div id="drawer-scrim" class="drawer-scrim" hidden></div>
+  <aside id="detail" class="detail" hidden aria-label="Карточка чата"></aside>
+  <dialog id="modal"><div class="modal-heading"><h2 id="modal-title"></h2><button id="close-modal" class="icon-button" aria-label="Закрыть" data-icon="close"></button></div><div id="modal-body"></div></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
