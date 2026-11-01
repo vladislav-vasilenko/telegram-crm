@@ -20,6 +20,7 @@ def load_demo(store):
         ("demo_9", "Никита", 117, 14, False, "user", "Спасибо, всё получил. Хорошего дня!", Annotation()),
         ("demo_10", "Дарья", 0, 38, False, "user", "Отправила подборку, посмотри, когда будет время", Annotation()),
         ("demo_11", "Полина", 4, 30, False, "user", "Давай расскажу, что нового за неделю", Annotation(dating=True, stage="talking", last_progress_at=now - timedelta(days=45))),
+        ("demo_13", "Анна, рекрутер", 3, 6, False, "user", "Вакансия ещё открыта, когда удобно созвониться на собеседование?", Annotation()),
         ("demo_12", "Ирина", 56, 8, False, "user", "Спасибо за вечер! Рада была увидеться", Annotation(dating=True, stage="met")),
     ]
     for chat_id, title, days, size, pinned, kind, ending, annotation in fixtures:

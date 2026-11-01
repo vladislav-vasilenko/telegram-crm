@@ -1,6 +1,8 @@
 """Private local SQLite store. Telegram IDs, session secrets and messages stay here."""
+import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import uuid
@@ -19,6 +21,18 @@ def private_json(path: Path, value: dict):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(value, stream, ensure_ascii=False)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def private_text(path: Path, text: str):
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".private-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(text)
         os.chmod(temporary, 0o600)
         os.replace(temporary, path)
     finally:
@@ -75,6 +89,21 @@ class Store:
         with self.db:
             self.db.execute("UPDATE chats SET present=0 WHERE seen_scan IS NULL OR seen_scan != ?", (scan_id,))
         self.set_metadata("last_scan_at", utcnow().isoformat())
+
+    def mark_removed(self, chat_id):
+        """Hide a chat removed in Telegram; its row (notes, labels) stays for the record."""
+        with self.db:
+            self.db.execute("UPDATE chats SET present=0 WHERE id=?", (chat_id,))
+        # Photos of a removed chat should not linger in the on-demand cache.
+        shutil.rmtree(self.directory / "media-cache" / hashlib.sha256(chat_id.encode()).hexdigest()[:24], ignore_errors=True)
+
+    def snapshot(self, path: Path):
+        target = sqlite3.connect(path)
+        try:
+            self.db.backup(target)
+        finally:
+            target.close()
+        path.chmod(0o600)
 
     def get(self, chat_id):
         row = self.db.execute("SELECT * FROM chats WHERE id=?", (chat_id,)).fetchone()

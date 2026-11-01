@@ -8,8 +8,9 @@ from datetime import timedelta
 from telethon import TelegramClient, errors, functions, types
 
 from .analysis import classify
+from .layout import with_all_pins
 from .models import Chat, Message
-from .store import utcnow
+from .store import private_json, private_text, utcnow
 
 # Pause between history requests: starts small, doubles after a FloodWait, then decays back.
 HISTORY_DELAY_MIN = 0.25
@@ -19,6 +20,9 @@ FLOOD_WAIT_MAX = 60
 FLOOD_RETRIES = 3
 # Incremental updates miss edits/deletions of older messages, so reload each chat fully this often.
 FULL_REFRESH_AFTER = timedelta(days=7)
+# Cleanup: every chat's full text history is saved locally before it is touched.
+BACKUP_MAX_MESSAGES = 20_000
+CLEANUP_DELAY = 1.0
 
 
 class TelegramService:
@@ -309,7 +313,7 @@ class TelegramService:
                 client = await self.get_client()
                 settings = self.store.settings()
                 limit = settings.history_limit
-                dialogs = [dialog async for dialog in client.iter_dialogs(ignore_migrated=True)]
+                dialogs = await with_all_pins(client, [dialog async for dialog in client.iter_dialogs(ignore_migrated=True)])
                 dialogs = [d for d in dialogs if not getattr(d.entity, "is_self", False)]
                 self.status["total"] = len(dialogs)
                 self.store.clear_demo()
@@ -370,9 +374,142 @@ class TelegramService:
                        urls=urls, forwarded=message.fwd_from is not None,
                        media=type(message.media).__name__ if message.media else None)
 
+    async def with_flood_retry(self, factory):
+        """Run factory() and wait out short FloodWaits in place, like history fetching does."""
+        for attempt in range(FLOOD_RETRIES + 1):
+            try:
+                return await factory()
+            except errors.FloodWaitError as error:
+                if error.seconds > FLOOD_WAIT_MAX or attempt == FLOOD_RETRIES:
+                    raise
+                previous = self.status["message"]
+                self.status["message"] = f"Telegram попросил паузу {error.seconds} сек — продолжу автоматически"
+                await asyncio.sleep(error.seconds + 1)
+                self.status["message"] = previous
+
+    def start_cleanup(self, plan):
+        """plan: [{"id", "title", "kind", "username", "action": "leave" | "delete"}], already filtered by the server."""
+        self.require_ready()
+        if self.lock.locked() or self.status["running"]:
+            raise ValueError("Операция с Telegram уже выполняется")
+        self.status = {"running": True, "done": 0, "total": len(plan), "error": None,
+                       "message": "Очистка: готовлю резервную копию…"}
+        self.task = asyncio.create_task(self.cleanup(plan))
+
+    @staticmethod
+    def backup_message(message):
+        sender = getattr(message, "sender", None)
+        name = None
+        if sender is not None:
+            name = getattr(sender, "title", None) or " ".join(
+                filter(None, [getattr(sender, "first_name", None), getattr(sender, "last_name", None)])) or getattr(sender, "username", None)
+        service = isinstance(message, types.MessageService)
+        return {"id": message.id, "date": message.date.isoformat() if message.date else None, "outgoing": bool(message.out),
+                "sender_id": message.sender_id, "sender": name,
+                "text": "" if service else (message.message or ""),
+                "media": type(message.media).__name__ if getattr(message, "media", None) else None,
+                "service_action": type(message.action).__name__ if service else None,
+                "reply_to": message.reply_to_msg_id, "forwarded": getattr(message, "fwd_from", None) is not None}
+
+    async def backup_chat(self, client, peer, item, directory):
+        messages = []
+
+        async def load():
+            messages.clear()
+            async for message in client.iter_messages(peer, limit=BACKUP_MAX_MESSAGES):
+                if isinstance(message, (types.Message, types.MessageService)):
+                    messages.append(self.backup_message(message))
+
+        await self.with_flood_retry(load)
+        messages.reverse()  # chronological
+        truncated = len(messages) >= BACKUP_MAX_MESSAGES
+        private_json(directory / f"{item['id']}.json", {
+            "chat": {k: item[k] for k in ("id", "title", "kind", "username", "action")},
+            "exported_at": utcnow().isoformat(), "message_count": len(messages), "truncated": truncated,
+            "note": "Только текст и метаданные; медиафайлы не скачивались.", "messages": messages})
+        lines = [f"{item['title']} ({item['kind']}, id {item['id']})", f"Сообщений: {len(messages)}" + (" (обрезано)" if truncated else ""), ""]
+        for m in messages:
+            who = "Я" if m["outgoing"] else (m["sender"] or str(m["sender_id"] or "?"))
+            extra = f" [{m['media']}]" if m["media"] else f" [{m['service_action']}]" if m["service_action"] else ""
+            lines.append(f"[{m['date']}] {who}: {m['text']}{extra}")
+        private_text(directory / f"{item['id']}.txt", "\n".join(lines) + "\n")
+        return {"backup_file": f"{item['id']}.json", "messages": len(messages), "truncated": truncated}
+
+    async def remove_chat(self, client, peer):
+        """One call per dialog: leave channels/groups, or delete a private/bot chat for me only (revoke=False)."""
+        await self.with_flood_retry(lambda: client.delete_dialog(peer, revoke=False))
+
+    async def cleanup(self, plan):
+        async with self.lock:
+            directory = self.store.directory / "backups" / utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+            directory.mkdir(parents=True, mode=0o700)
+            (self.store.directory / "backups").chmod(0o700)
+            manifest = {"created_at": utcnow().isoformat(), "crm_snapshot": "crm.sqlite3",
+                        "note": "Полная текстовая история каждого чата сохранена до удаления. Чат не удалялся, если копия не удалась.",
+                        "chats": []}
+            removed = 0
+            self.status["backup_dir"] = str(directory)
+            try:
+                # Snapshot of every chat the CRM knows (loaded windows, notes, labels) before anything changes.
+                self.store.snapshot(directory / "crm.sqlite3")
+                client = await self.get_client()
+                for index, item in enumerate(plan):
+                    entry = dict(item, status="pending")
+                    manifest["chats"].append(entry)
+                    verb = "отписываюсь" if item["action"] == "leave" else "удаляю у себя"
+                    try:
+                        self.status["message"] = f"Очистка {index + 1} из {len(plan)}: копия «{item['title']}»"
+                        try:
+                            peer = await client.get_input_entity(int(item["id"]))
+                        except (ValueError, TypeError):
+                            entry.update(status="failed", error="Чат не найден в сессии; обновите чаты и повторите")
+                            continue
+                        try:
+                            entry.update(await self.backup_chat(client, peer, item, directory))
+                        except errors.FloodWaitError:
+                            raise
+                        except (errors.RPCError, OSError, ValueError) as error:
+                            entry.update(status="skipped", error=f"Резервная копия не удалась ({type(error).__name__}); чат не тронут")
+                            continue
+                        self.status["message"] = f"Очистка {index + 1} из {len(plan)}: {verb} «{item['title']}»"
+                        try:
+                            await self.remove_chat(client, peer)
+                        except errors.FloodWaitError:
+                            raise
+                        except (errors.RPCError, ValueError) as error:
+                            entry.update(status="failed", error=f"Telegram отклонил ({type(error).__name__}); копия сохранена")
+                            continue
+                        entry["status"] = "removed"
+                        removed += 1
+                        self.store.mark_removed(item["id"])
+                        await asyncio.sleep(CLEANUP_DELAY)
+                    finally:
+                        self.status["done"] = index + 1
+                        private_json(directory / "manifest.json", manifest)
+                problems = len(plan) - removed
+                self.status["message"] = (f"Очистка завершена: {removed} из {len(plan)}"
+                                          + (f", не выполнено: {problems} (см. manifest.json)" if problems else "")
+                                          + f". Копия: {directory}")
+            except errors.FloodWaitError as error:
+                until = utcnow() + timedelta(seconds=error.seconds + 1)
+                self.store.set_metadata("telegram_cooldown_until", until.isoformat())
+                self.status["error"] = (f"Telegram запросил паузу {error.seconds} сек. Очищено {removed}; "
+                                        f"остальные не тронуты. Копия: {directory}")
+            except asyncio.CancelledError:
+                self.status["message"] = f"Очистка остановлена: очищено {removed}. Копия: {directory}"
+                raise
+            except Exception as error:
+                self.status["error"] = f"Очистка прервана ({type(error).__name__}). Очищено {removed}. Копия: {directory}"
+            finally:
+                private_json(directory / "manifest.json", manifest)
+                self.status["running"] = False
+                self.store.set_metadata("last_cleanup", {"directory": str(directory), "removed": removed,
+                                                         "planned": len(plan), "at": utcnow().isoformat()})
+
     def folder_plan(self):
-        names = {"important": "CRM Важные", "stalled": "CRM Зависло", "suspected_scam": "CRM Проверка",
-                 "inactive": "CRM Неактив", "very_old": "CRM Старые", "dead": "CRM Мёртвые"}
+        names = {"important": "CRM Важные", "job": "CRM Работа", "stalled": "CRM Зависло", "suspected_scam": "CRM Проверка",
+                 "inactive": "CRM Неактив", "very_old": "CRM Старые", "dead": "CRM Мёртвые",
+                 "spam": "CRM Спам", "short": "CRM Короткие"}
         rows = [classify(**row, settings=self.store.settings()) for row in self.store.all() if not row["chat"].demo]
         return [{"category": key, "title": title, "chat_ids": [row["id"] for row in rows if key in row["categories"]]}
                 for key, title in names.items()]

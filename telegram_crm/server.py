@@ -2,26 +2,35 @@ import asyncio
 import csv
 import io
 import os
+import re
 import secrets
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from telethon import errors
 
 from .analysis import CATEGORIES, classify
 from .demo import load_demo
-from .llm import analyze_batch, create_batch, import_result
-from .models import Annotation, AuthApp, AuthCode, AuthPassword, AuthStart, BatchRequest, ImportRequest, LLMKey, ScanRequest, Settings
+from .chat_export import full_history, recent_text
+from .layout import fetch_layout
+from .media import INLINE_TYPES, MediaService, attachment_header, describe, parse_range
+from .llm import PartsFailed, analyze_batch, create_batch, estimate, import_result, provider_for
+from .models import Annotation, AuthApp, CleanupRequest, AuthCode, AuthPassword, AuthStart, BatchRequest, ImportRequest, LLMKey, ScanRequest, Settings
 from .store import Store, utcnow
 from .telegram import TelegramService
+from .triage import apply_triage, triage_summary
 
 STATIC = Path(__file__).parent / "static"
+
+
+LAYOUT_FRESH_SECONDS = 30
 
 
 def create_app(data_dir: Path, *, demo=False, testing=False):
@@ -29,16 +38,22 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
     if not store.metadata("settings") and os.environ.get("TG_LLM_MODEL"):
         store.save_settings(Settings(llm_model=os.environ["TG_LLM_MODEL"]))
     telegram = TelegramService(store)
+    media = MediaService(telegram, store)
+    layout_lock = asyncio.Lock()
     token = secrets.token_urlsafe(32)
     jobs = {"llm": {"running": False, "done": 0, "total": 0, "error": None}}
     llm_task = None
 
-    def api_key():
+    def api_key(provider=None):
+        provider = provider or provider_for(store.settings().llm_model)
+        if provider == "anthropic":
+            return os.environ.get("ANTHROPIC_API_KEY") or store.credentials().get("anthropic_api_key")
         return os.environ.get("OPENAI_API_KEY") or store.credentials().get("openai_api_key")
 
     def analyzed_rows():
         settings = store.settings()
-        return sorted([classify(**row, settings=settings) for row in store.all()],
+        saved = store.metadata("triage", {})
+        return sorted([apply_triage(classify(**row, settings=settings), row["chat"], row["annotation"], saved) for row in store.all()],
                       key=lambda r: (-r["priority_score"], r["title"].lower()))
 
     def remaining(rows=None):
@@ -51,7 +66,8 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
             raise ValueError("Анализ LLM уже выполняется")
         key = api_key()
         if not key:
-            raise ValueError("Добавьте API-ключ в настройках или используйте копирование пачки")
+            provider = "Anthropic" if provider_for(store.settings().llm_model) == "anthropic" else "OpenAI"
+            raise ValueError(f"Добавьте API-ключ {provider} в настройках или используйте копирование пачки")
         for chat_id in request.chat_ids:
             if not store.get(chat_id):
                 raise ValueError("Один из выбранных чатов не найден")
@@ -63,6 +79,8 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
                                     lambda done, total: jobs["llm"].update(done=done, total=total))
             except asyncio.CancelledError:
                 raise
+            except PartsFailed as error:
+                jobs["llm"]["error"] = str(error)  # our own summary, no provider text
             except Exception as error:
                 # Provider errors may echo a key or message text. Never return their body.
                 jobs["llm"]["error"] = f"Анализ остановлен ({type(error).__name__}). Проверьте ключ, модель и доступ к API. Завершённые части сохранены."
@@ -116,6 +134,7 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
 
     app = FastAPI(title="Диалоги / Telegram CRM", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store, app.state.telegram = store, telegram
+    app.state.media = media
 
     @app.middleware("http")
     async def local_only(request: Request, call_next):
@@ -164,6 +183,10 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
     async def index():
         return FileResponse(STATIC / "index.html")
 
+    @app.get("/telegram")
+    async def telegram_view():
+        return FileResponse(STATIC / "telegram.html")
+
     @app.get("/api/health")
     async def health():
         return {"application": "telegram-dialogue-crm", "version": "0.1.0"}
@@ -173,11 +196,13 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
         rows = analyzed_rows()
         return {"token": token, "chats": rows,
                 "counts": {key: sum(key in row["categories"] for row in rows) for key in CATEGORIES},
-                "categories": CATEGORIES, "settings": store.settings().model_dump(),
+                "categories": CATEGORIES, "triage": triage_summary(rows, store.metadata("triage")), "settings": store.settings().model_dump(),
                 "last_scan_at": store.metadata("last_scan_at"), "demo": bool(rows and all(row["demo"] for row in rows)),
                 "telegram": {"authorized": telegram.authorized, "account": telegram.account, "step": telegram.auth_step,
                              "configured": bool(os.environ.get("TG_API_ID") or store.credentials().get("api_id")), "delivery": telegram.delivery},
                 "scan": telegram.status, "llm_job": jobs["llm"], "llm_configured": bool(api_key()),
+                "llm_provider": provider_for(store.settings().llm_model),
+                "llm_keys": {"openai": bool(api_key("openai")), "anthropic": bool(api_key("anthropic"))},
                 "remaining_count": len(remaining(rows)), "now": utcnow().isoformat()}
 
     @app.get("/api/status")
@@ -185,12 +210,120 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
         # Cheap progress poll: /api/state classifies every chat and runs on the same event loop as the scan.
         return {"scan": telegram.status, "llm_job": jobs["llm"]}
 
+    @app.get("/api/search")
+    async def search(q: str = ""):
+        """Chats whose loaded messages contain q, with a snippet of the newest match."""
+        query = q.strip()
+        if len(query) < 2:
+            return {"query": query, "hits": {}}
+        pattern = re.compile(re.escape(query), re.I)
+        hits = {}
+        for row in store.all():
+            for message in sorted(row["chat"].messages, key=lambda m: (m.date, m.id), reverse=True):
+                match = pattern.search(message.text)
+                if match:
+                    hits[row["chat"].id] = " ".join(message.text[max(0, match.start() - 60):match.end() + 100].split())
+                    break
+        return {"query": query, "hits": hits}
+
+    def media_chat(chat_id: str, request: Request):
+        """Real Telegram chats only, and never for a page on another site."""
+        if request.headers.get("sec-fetch-site") == "cross-site":
+            raise HTTPException(403, "Запрос с другого сайта запрещён")
+        row = store.get(chat_id)
+        if not row:
+            raise HTTPException(404, "Чат не найден")
+        return row["chat"]
+
+    @app.get("/api/telegram/layout")
+    async def telegram_layout(cached: bool = False):
+        """Live order and folders; the last saved copy when asked for it or when Telegram cannot answer."""
+        saved = store.metadata("telegram_layout", {"dialogs": [], "folders": []})
+        if cached or not telegram.authorized:
+            return saved
+        async with layout_lock:
+            saved = store.metadata("telegram_layout", saved)
+            fetched = saved.get("fetched_at")
+            if fetched and (utcnow() - datetime.fromisoformat(fetched)).total_seconds() < LAYOUT_FRESH_SECONDS:
+                return saved
+            try:
+                telegram.require_ready()
+                fresh = await fetch_layout(await telegram.get_client())
+            except (ValueError, OSError, errors.RPCError) as error:
+                return {**saved, "stale": True, "error": type(error).__name__}
+            store.set_metadata("telegram_layout", fresh)
+            return fresh
+
+    async def export_peer(chat):
+        if chat.demo:
+            raise ValueError("Для демо-чата доступна только выгрузка последних сообщений")
+        if not telegram.authorized:
+            raise ValueError("Подключите Telegram в веб-панели")
+        return await media.client_and_peer(chat.id)
+
+    @app.get("/api/chats/{chat_id}/export/info")
+    async def export_info(chat_id: str, request: Request):
+        client, peer = await export_peer(media_chat(chat_id, request))
+        return {"total": (await client.get_messages(peer, limit=0)).total}
+
+    @app.get("/api/chats/{chat_id}/export")
+    async def export_chat(chat_id: str, request: Request, scope: Literal["recent", "full"] = "recent"):
+        chat = media_chat(chat_id, request)
+        if scope == "recent":
+            name = f"{chat.title} - последние 100.txt"
+            return Response(recent_text(chat), media_type="text/plain; charset=utf-8",
+                            headers={"Content-Disposition": attachment_header(name, False)})
+        client, peer = await export_peer(chat)
+        total = (await client.get_messages(peer, limit=0)).total
+        return StreamingResponse(full_history(client, peer, chat, total), media_type="text/plain; charset=utf-8",
+                                 headers={"Content-Disposition": attachment_header(f"{chat.title} - вся история.txt", False)})
+
+    @app.get("/api/chats/{chat_id}/media")
+    async def media_info(chat_id: str, request: Request, ids: str = ""):
+        chat = media_chat(chat_id, request)
+        message_ids = [int(value) for value in ids.split(",") if value.isdigit()][:100]
+        if chat.demo or not message_ids or not telegram.authorized:
+            return {"items": {}}
+        return {"items": await media.info(chat_id, message_ids)}
+
+    @app.get("/api/chats/{chat_id}/media/{message_id}/preview")
+    async def media_preview(chat_id: str, message_id: int, request: Request):
+        media_chat(chat_id, request)
+        try:
+            return FileResponse(await media.cached_image(chat_id, message_id, "preview"), media_type="image/jpeg")
+        except KeyError:
+            raise HTTPException(404, "Вложение не найдено") from None
+
+    @app.get("/api/chats/{chat_id}/media/{message_id}/file")
+    async def media_file(chat_id: str, message_id: int, request: Request, download: bool = False):
+        media_chat(chat_id, request)
+        try:
+            message = await media.message(chat_id, message_id)
+            described = describe(message)
+            inline = described["mime"] in INLINE_TYPES and not download
+            disposition = {"Content-Disposition": attachment_header(described["name"], inline)}
+            if described["size"] is None:  # a photo: Telegram has no byte ranges for it, the disk cache does
+                return FileResponse(await media.cached_image(chat_id, message_id, "full"), media_type="image/jpeg", headers=disposition)
+            byte_range = parse_range(request.headers.get("range"), described["size"])
+            body, start, end, size = await media.open_stream(chat_id, message_id, byte_range)
+        except KeyError:
+            raise HTTPException(404, "Вложение не найдено") from None
+        except ValueError as error:
+            if "диапазон" in str(error):
+                return Response(status_code=416, headers={"Content-Range": f"bytes */{described['size']}"})
+            raise
+        headers = {**disposition, "Accept-Ranges": "bytes", "Content-Length": str(end - start + 1)}
+        if byte_range:
+            headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+        return StreamingResponse(body, status_code=206 if byte_range else 200,
+                                 media_type=described["mime"] if inline else "application/octet-stream", headers=headers)
+
     @app.get("/api/chats/{chat_id}")
     async def chat(chat_id: str):
         row = store.get(chat_id)
         if not row:
             raise HTTPException(404, "Чат не найден")
-        return {**classify(**row, settings=store.settings()),
+        return {**apply_triage(classify(**row, settings=store.settings()), row["chat"], row["annotation"], store.metadata("triage", {})),
                 "messages": [m.model_dump(mode="json") for m in sorted(row["chat"].messages, key=lambda m: (m.date, m.id))]}
 
     @app.put("/api/chats/{chat_id}/annotation")
@@ -209,13 +342,16 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
 
     @app.put("/api/llm/key")
     async def save_key(key: LLMKey):
-        store.save_credentials(openai_api_key=key.api_key.strip())
+        store.save_credentials(**{f"{key.provider}_api_key": key.api_key.strip()})
         return {"ok": True}
 
     @app.delete("/api/llm/key")
-    async def delete_key():
-        store.save_credentials(openai_api_key="")
-        return {"ok": True, "environment_key_present": bool(os.environ.get("OPENAI_API_KEY"))}
+    async def delete_key(provider: str = "openai"):
+        if provider not in ("openai", "anthropic"):
+            raise ValueError("Неизвестный провайдер")
+        store.save_credentials(**{f"{provider}_api_key": ""})
+        env = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
+        return {"ok": True, "environment_key_present": bool(os.environ.get(env))}
 
     @app.post("/api/demo")
     async def demo_data():
@@ -260,6 +396,27 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
         telegram.start_scan(full=bool(request and request.full))
         return {"started": True}
 
+    @app.post("/api/cleanup", status_code=202)
+    async def cleanup(request: CleanupRequest):
+        rows = {row["id"]: row for row in analyzed_rows()}
+        plan, skipped = [], {"important": 0, "not_selected_action": 0, "unknown": 0}
+        for chat_id in request.chat_ids:
+            row = rows.get(chat_id)
+            if not row or row["demo"]:
+                skipped["unknown"] += 1
+            elif "important" in row["categories"] and not request.include_important:
+                skipped["important"] += 1  # pinned, frequent, marked or LLM-important chats are protected by default
+            elif row["kind"] in ("channel", "group") and request.unfollow:
+                plan.append({**{k: row[k] for k in ("id", "title", "kind", "username")}, "action": "leave"})
+            elif row["kind"] in ("user", "bot") and request.delete:
+                plan.append({**{k: row[k] for k in ("id", "title", "kind", "username")}, "action": "delete"})
+            else:
+                skipped["not_selected_action"] += 1
+        if not plan:
+            raise ValueError("Нет чатов для очистки: важные защищены, а для остальных не выбрано подходящее действие")
+        telegram.start_cleanup(plan)
+        return {"started": True, "planned": len(plan), "skipped": skipped}
+
     @app.post("/api/scan/cancel")
     async def cancel_scan():
         if telegram.task and not telegram.task.done():
@@ -273,6 +430,10 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
     @app.post("/api/batches/import")
     async def import_batch(request: ImportRequest):
         return {"imported": import_result(store, request.batch_id, request.result)}
+
+    @app.post("/api/llm/estimate")
+    async def llm_estimate(request: BatchRequest):
+        return estimate(store, request)
 
     @app.post("/api/llm/analyze", status_code=202)
     async def llm(request: BatchRequest):

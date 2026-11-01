@@ -20,6 +20,9 @@ def test_scan_reads_without_marking_read_or_sending(tmp_path, monkeypatch):
                            input_entity=types.InputPeerUser(123,42),is_user=True,is_group=False,is_channel=False,
                            pinned=True,archived=False,unread_count=3)
     class ReadOnlyClient:
+        async def __call__(self,request):
+            assert isinstance(request,functions.messages.GetPinnedDialogsRequest)  # the scan only reads
+            return SimpleNamespace(dialogs=[],users=[],chats=[],messages=[])
         history_calls=0
         async def iter_dialogs(self,**kwargs):
             yield dialog
@@ -47,6 +50,9 @@ def test_floodwait_preserves_previous_data_and_cooldown(tmp_path,monkeypatch):
     store.upsert(Chat(id='1',title='Сохранённый чат'))
     service=TelegramService(store)
     class FloodClient:
+        async def __call__(self,request):
+            assert isinstance(request,functions.messages.GetPinnedDialogsRequest)  # the scan only reads
+            return SimpleNamespace(dialogs=[],users=[],chats=[],messages=[])
         async def iter_dialogs(self,**kwargs):
             raise errors.FloodWaitError(request=None,capture=60)
             yield
@@ -77,13 +83,16 @@ def test_folder_apply_preserves_unrelated_folders(tmp_path):
     service.authorized=True
     service.get_client=AsyncMock(return_value=FakeClient())
     result=asyncio.run(service.apply_folders())
-    assert result['updated']==['CRM Важные']
-    assert len(writes)==1 and writes[0].id!=2
+    assert result['updated']==['CRM Важные','CRM Короткие']  # one message: also ultra-short
+    assert len(writes)==2 and all(w.id!=2 for w in writes) and writes[0].id!=writes[1].id
     assert writes[0].filter.include_peers[0].user_id==123
     store.close()
 
 
 class HistoryClient:
+    async def __call__(self,request):
+        assert isinstance(request,functions.messages.GetPinnedDialogsRequest)  # the scan only reads
+        return SimpleNamespace(dialogs=[],users=[],chats=[],messages=[])
     """Fake client holding one chat; honours min_id like messages.getHistory."""
     def __init__(self,texts):
         self.history=[types.Message(id=i,peer_id=types.PeerUser(7),date=utcnow(),message=t,out=False) for i,t in enumerate(texts,1)]
@@ -173,4 +182,55 @@ def test_long_floodwait_still_stops_scan_with_cooldown(tmp_path,monkeypatch):
     service.get_client=AsyncMock(return_value=client)
     asyncio.run(service.scan())
     assert '600' in service.status['error'] and store.metadata('telegram_cooldown_until')
+    store.close()
+
+
+class CleanupClient:
+    """Fake client: history per peer id, records delete_dialog calls."""
+    def __init__(self, histories, broken=()):
+        self.histories, self.broken, self.deleted, self.order = histories, set(broken), [], []
+    async def get_input_entity(self, chat_id):
+        if chat_id < 0:
+            return types.InputPeerChannel(-chat_id, 1)
+        return types.InputPeerUser(chat_id, 1)
+    async def iter_messages(self, peer, limit):
+        key = getattr(peer, 'user_id', None) or -peer.channel_id
+        if key in self.broken:
+            raise errors.ChannelPrivateError(request=None)
+        self.order.append(('backup', key))
+        for message in reversed(self.histories[key]):
+            yield message
+    async def delete_dialog(self, peer, revoke):
+        key = getattr(peer, 'user_id', None) or -peer.channel_id
+        self.order.append(('delete', key))
+        self.deleted.append((key, revoke))
+
+
+def test_cleanup_backs_up_before_deleting_and_never_revokes(tmp_path, monkeypatch):
+    import json as _json
+    monkeypatch.setattr('telegram_crm.telegram.asyncio.sleep', AsyncMock())
+    store = Store(tmp_path)
+    for chat_id, kind in (('5', 'user'), ('-77', 'channel'), ('6', 'user')):
+        store.upsert(Chat(id=chat_id, title=f'Чат {chat_id}', kind=kind))
+    msg = lambda i, text, out=False: types.Message(id=i, peer_id=types.PeerUser(5), date=utcnow(), message=text, out=out)
+    client = CleanupClient({5: [msg(1, 'привет'), msg(2, 'ответ', True)], -77: [msg(9, 'пост')], 6: []}, broken={6})
+    service = TelegramService(store); service.authorized = True
+    service.get_client = AsyncMock(return_value=client)
+    plan = [{'id': '5', 'title': 'Чат 5', 'kind': 'user', 'username': None, 'action': 'delete'},
+            {'id': '-77', 'title': 'Канал', 'kind': 'channel', 'username': None, 'action': 'leave'},
+            {'id': '6', 'title': 'Чат 6', 'kind': 'user', 'username': None, 'action': 'delete'}]
+    asyncio.run(service.cleanup(plan))
+    # Backup always precedes the single delete call; nothing is revoked for the other side.
+    assert client.order == [('backup', 5), ('delete', 5), ('backup', -77), ('delete', -77)]
+    assert client.deleted == [(5, False), (-77, False)]
+    backups = next((tmp_path / 'backups').iterdir())
+    saved = _json.loads((backups / '5.json').read_text())
+    assert [m['text'] for m in saved['messages']] == ['привет', 'ответ'] and saved['messages'][1]['outgoing']
+    assert 'Я: ответ' in (backups / '5.txt').read_text()
+    assert (backups / 'crm.sqlite3').exists() and oct((backups / '5.json').stat().st_mode)[-3:] == '600'
+    manifest = _json.loads((backups / 'manifest.json').read_text())
+    assert [c['status'] for c in manifest['chats']] == ['removed', 'removed', 'skipped']  # failed backup => untouched
+    remaining = {row['chat'].id for row in store.all()}
+    assert remaining == {'6'}
+    assert 'не выполнено: 1' in service.status['message'] and not service.status['running']
     store.close()

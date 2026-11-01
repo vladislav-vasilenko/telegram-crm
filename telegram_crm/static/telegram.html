@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Диалоги — вид Telegram</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/telegram-view.css">
+  <script src="/static/media.js" defer></script>
+  <script src="/static/chat-export.js" defer></script>
+  <script src="/static/telegram-view.js" defer></script>
+</head>
+<body>
+  <div class="app" id="app">
+    <nav class="rail" aria-label="Папки и сортировка">
+      <a class="rail-item back" href="/" title="Вернуться в панель"><b>←</b><span>Панель</span></a>
+      <div class="rail-title">ПАПКИ</div>
+      <div id="folders"></div>
+      <div class="rail-title">ТИП</div>
+      <div id="kinds"></div>
+      <div class="rail-title">ПОРЯДОК</div>
+      <div id="sorts"></div>
+    </nav>
+    <section class="list-pane" aria-label="Чаты">
+      <div class="list-head">
+        <input id="search" type="search" placeholder="Поиск по чатам и сообщениям" aria-label="Поиск">
+        <div id="list-count" class="list-count"></div>
+      </div>
+      <div id="status" class="status" hidden></div>
+      <ul id="chats" class="chats"></ul>
+      <div id="sentinel" aria-hidden="true"></div>
+    </section>
+    <main class="chat-pane" id="chat-pane">
+      <div class="placeholder" id="placeholder"><span>Выберите чат</span></div>
+      <div class="chat-view" id="chat-view" hidden>
+        <header class="chat-head" id="chat-head"></header>
+        <div class="messages" id="messages"></div>
+      </div>
+    </main>
+    <aside class="tools" aria-label="Инструменты разбора">
+      <button id="tools-close" class="tools-toggle" type="button">Инструменты</button>
+      <section>
+        <h2>Цвета</h2>
+        <label class="switch"><input id="color-mode" type="checkbox" checked><span>Подсветка чатов</span></label>
+        <div id="legend"></div>
+        <p class="hint">Нажмите на цвет, чтобы скрыть или показать его в списке.</p>
+      </section>
+      <section>
+        <h2>Умное выделение</h2>
+        <div id="smart"></div>
+        <p class="hint">Учитывает папку и тип слева, а также поиск. «Проверить» и «Оставить» эти кнопки не выбирают.</p>
+      </section>
+      <section class="selection" id="selection" hidden>
+        <strong id="selection-count"></strong>
+        <div class="selection-actions">
+          <button id="only-selected" type="button"></button>
+          <button id="clear-selection" type="button">Снять всё</button>
+        </div>
+        <button id="cleanup" class="danger" type="button">Отписаться / удалить…</button>
+      </section>
+      <section id="about" hidden>
+        <h2>О чате</h2>
+        <div id="about-body"></div>
+      </section>
+    </aside>
+  </div>
+  <dialog id="cleanup-dialog" aria-labelledby="cleanup-title">
+    <form id="cleanup-form">
+      <h2 id="cleanup-title">Отписаться / удалить</h2>
+      <div id="cleanup-body"></div>
+      <div class="dialog-actions">
+        <button type="button" id="cleanup-cancel">Отмена</button>
+        <button type="submit" class="danger">Сделать копию и очистить</button>
+      </div>
+    </form>
+  </dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

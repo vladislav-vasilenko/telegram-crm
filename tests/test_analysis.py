@@ -65,7 +65,7 @@ def test_ongoing_conversation_with_old_manual_progress_is_stalled():
     assert "stalled" in row["categories"]
 
 
-@pytest.mark.parametrize("stage", ["met", "relationship", "closed"])
+@pytest.mark.parametrize("stage", ["met", "kissed", "sex_protected", "sex_unprotected", "regular_partner", "relationship", "closed"])
 def test_developed_relationship_not_stalled(stage):
     row=analyze(chat_at(NOW-timedelta(days=40)), Annotation(dating=True,stage=stage))
     assert "stalled" not in row["categories"]
@@ -113,3 +113,75 @@ def test_stale_llm_does_not_change_classification():
     row=analyze(chat,llm=result)
     assert row["llm_stale"]
     assert "important" not in row["categories"]
+
+
+def convo(pattern, kind="user", **kwargs):
+    """pattern: string of 'i' (incoming) / 'o' (outgoing), oldest first."""
+    messages = [Message(id=i + 1, date=NOW - timedelta(minutes=len(pattern) - i), outgoing=c == "o", text="текст")
+                for i, c in enumerate(pattern)]
+    return Chat(id="9", title="Поток", kind=kind, messages=messages, **kwargs)
+
+
+def test_spam_needs_uninterrupted_incoming_streak():
+    assert "spam" in analyze(convo("o" + "i" * 20 + "o"))["categories"]
+    assert analyze(convo("o" + "i" * 20))["incoming_streak"] == 20
+    row = analyze(convo("i" * 19 + "o" + "i" * 19))  # 38 incoming, but my reply breaks the run
+    assert "spam" not in row["categories"] and row["incoming_streak"] == 19
+
+
+def test_spam_only_for_private_user_chats_and_respects_manual_marks():
+    for kind in ("group", "channel", "bot"):
+        assert "spam" not in analyze(convo("i" * 25, kind=kind))["categories"]
+    assert "spam" not in analyze(convo("i" * 25), Annotation(important=True))["categories"]
+    assert "spam" not in analyze(convo("i" * 25), Annotation(risk_review="trusted"))["categories"]
+
+
+def test_short_chat_counts_whole_history_only_when_fully_loaded():
+    assert "short" in analyze(convo("io" * 9 + "i"))["categories"]  # 19 messages
+    assert "short" not in analyze(convo("io" * 10))["categories"]  # 20 messages
+    assert "short" in analyze(convo(""))["categories"]  # empty but fully loaded
+    assert "short" not in analyze(convo("io" * 5, history_status="limited"))["categories"]
+    # A loaded window that hit the per-chat limit says nothing about the true total.
+    assert "short" not in analyze(convo("io" * 5, history_limit=10))["categories"]
+
+
+def test_spam_and_short_are_separate_and_thresholds_configurable():
+    spam = analyze(convo("i" * 20))
+    assert "spam" in spam["categories"] and "short" not in spam["categories"]
+    custom = classify(convo("i" * 8), Annotation(), Settings(spam_streak=8, short_chat_messages=5), None, NOW)
+    assert "spam" in custom["categories"] and "short" not in custom["categories"]
+
+
+def job_chat(*texts, title="Тест", kind="user"):
+    return Chat(id="1", title=title, kind=kind, messages=[
+        Message(id=i, date=NOW - timedelta(days=1, minutes=i), outgoing=False, text=text) for i, text in enumerate(texts, 1)])
+
+
+@pytest.mark.parametrize("texts,expected", [
+    (["Здравствуйте, у нас открыта вакансия", "Удобно завтра?"], True),  # strong word in a short chat
+    (["Как прошло собеседование?", "Пришлю резюме"], True),  # strong and weak in separate messages
+    (["Прочитал резюме статьи", "Хорошее интервью"], False),  # weak words alone are ambiguous
+    (["Завтра собеседование"] + ["Привет"] * 40, False),  # one mention in a long unrelated chat
+])
+def test_job_rules_for_private_chats(texts, expected):
+    assert ("job" in analyze(job_chat(*texts))["categories"]) is expected
+
+
+def test_job_needs_several_posts_in_broadcast_chats():
+    filler = ["Новости"] * 10
+    assert "job" not in analyze(job_chat("Вакансия", *filler, kind="channel"))["categories"]
+    assert "job" in analyze(job_chat("Вакансия", "Вакансия", "Вакансия", *filler, kind="channel"))["categories"]
+    assert "job" not in analyze(job_chat("Вакансия", *filler, kind="bot"))["categories"]
+
+
+def test_job_title_and_explained_reason():
+    row = analyze(job_chat("Привет", title="Вакансии для продактов", kind="channel"))
+    assert "job" in row["categories"] and "названию" in " ".join(row["reasons"])
+    assert "job" not in analyze(job_chat("Привет", title="Тестирование работы модели", kind="group"))["categories"]
+    reason = analyze(job_chat("Вакансия", "Вакансия"))["reasons"][0]
+    assert reason.startswith("Работа: вакансия ×2")
+
+
+def test_manual_job_mark_overrides_keywords():
+    assert "job" not in analyze(job_chat("Вакансия", "Вакансия"), Annotation(job=False))["categories"]
+    assert "job" in analyze(job_chat("Привет"), Annotation(job=True))["categories"]

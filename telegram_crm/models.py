@@ -15,17 +15,26 @@ class Settings(StrictModel):
     dead_years: int = Field(2, ge=1, le=20)
     frequent_messages: int = Field(20, ge=4, le=1000)
     history_limit: int = Field(100, ge=20, le=500)
+    spam_streak: int = Field(20, ge=5, le=500)
+    short_chat_messages: int = Field(20, ge=2, le=500)
     scan_interval_hours: int = Field(0, ge=0, le=720)
     llm_after_scan: bool = False
-    llm_model: str = Field("gpt-6-astra", min_length=1, max_length=120)
-    llm_max_chats: int = Field(20, ge=1, le=50)
+    # "claude-*" models go to the Anthropic API, everything else to OpenAI.
+    llm_model: str = Field("gpt-6-luna", min_length=1, max_length=120)
+    llm_max_chats: int = Field(20, ge=1, le=2000)
+    llm_messages_per_chat: int = Field(50, ge=5, le=500)
+    # Optional USD prices per 1M tokens, only for the cost estimate shown before a run.
+    llm_price_input_per_m: float | None = Field(None, ge=0, le=1000)
+    llm_price_output_per_m: float | None = Field(None, ge=0, le=1000)
     redact_contacts: bool = True
 
 
 class Annotation(StrictModel):
     important: bool | None = None
     dating: bool | None = None
-    stage: Literal["new", "talking", "meeting_planned", "met", "relationship", "closed"] = "new"
+    job: bool | None = None
+    stage: Literal["new", "talking", "meeting_planned", "met", "kissed", "sex_protected", "sex_unprotected",
+                   "regular_partner", "relationship", "closed"] = "new"
     last_progress_at: datetime | None = None
     risk_review: Literal["auto", "trusted", "scam"] = "auto"
     notes: str = Field("", max_length=10000)
@@ -88,7 +97,7 @@ class LLMChatResult(StrictModel):
 
 
 class LLMBatchResult(StrictModel):
-    results: list[LLMChatResult] = Field(min_length=1, max_length=50)
+    results: list[LLMChatResult] = Field(min_length=1, max_length=2000)
 
     @model_validator(mode="after")
     def unique_ids(self):
@@ -99,7 +108,7 @@ class LLMBatchResult(StrictModel):
 
 
 class BatchRequest(StrictModel):
-    chat_ids: list[str] = Field(min_length=1, max_length=50)
+    chat_ids: list[str] = Field(min_length=1, max_length=2000)
     redact_contacts: bool = True
 
     @field_validator("chat_ids")
@@ -122,6 +131,24 @@ class AuthStart(AuthApp):
     phone: str = Field(pattern=r"^\+[1-9][0-9]{7,14}$")
 
 
+class CleanupRequest(StrictModel):
+    chat_ids: list[str] = Field(min_length=1, max_length=5000)
+    unfollow: bool = False  # leave channels and groups
+    delete: bool = False  # delete private and bot chats for me only
+    include_important: bool = False
+
+    @field_validator("chat_ids")
+    @classmethod
+    def unique_ids(cls, value):
+        return list(dict.fromkeys(value))
+
+    @model_validator(mode="after")
+    def some_action(self):
+        if not (self.unfollow or self.delete):
+            raise ValueError("Выберите действие: отписаться и/или удалить")
+        return self
+
+
 class ScanRequest(StrictModel):
     full: bool = False
 
@@ -136,4 +163,5 @@ class AuthPassword(StrictModel):
 
 class LLMKey(StrictModel):
     api_key: str = Field(min_length=10, max_length=500)
+    provider: Literal["openai", "anthropic"] = "openai"
 

@@ -22,6 +22,10 @@ const paths = {
   close:'<path d="m6 6 12 12M6 18 18 6"/>',
   pin:'<path d="m16 3 5 5-5 2-2 5-3-2-6 6m2-8 2-5Z"/>',
   check:'<path d="m5 12 4 4L19 6"/>',
+  megaphone:'<path d="M3 10v4a1 1 0 0 0 1 1h3l7 5V4L7 9H4a1 1 0 0 0-1 1Z"/><path d="M18 9a4 4 0 0 1 0 6"/>',
+  short:'<path d="M4 5h16v11H9l-5 4Z"/><path d="M9 10.5h4"/>',
+  briefcase:'<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V4h6v3M3 13h18"/>',
+  trash:'<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6m4-6v6"/>',
 };
 const icon = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.inbox}</svg>`;
 function hydrateIcons(root = document) { $$('[data-icon]', root).forEach(el => el.innerHTML = icon(el.dataset.icon)); }
@@ -29,14 +33,24 @@ hydrateIcons();
 const meta = {
   all:{label:'Все чаты',icon:'inbox'},
   important:{label:'Важные',icon:'star',short:'Важный'},
+  job:{label:'Работа',icon:'briefcase',short:'Работа'},
   stalled:{label:'Знакомства без развития',icon:'heart',short:'Без развития'},
   suspected_scam:{label:'Подозрительные',icon:'shield',short:'Проверить'},
+  spam:{label:'Спам',icon:'megaphone',short:'Спам'},
   inactive:{label:'Неактивные',icon:'clock',short:'Неактивный'},
   very_old:{label:'Очень старые',icon:'archive',short:'Очень старый'},
   dead:{label:'Мёртвые',icon:'moon',short:'Мёртвый'},
+  short:{label:'Ультракороткие',icon:'short',short:'Короткий'},
   active:{label:'Остальные',icon:'inbox',short:'Без меток'},
 };
 let state = null, category = 'all', selected = new Set(), detailId = null, detailData = null;
+// Infinite scroll: render the first `shown` matching chats, load PAGE_SIZE more near the bottom.
+const PAGE_SIZE = 50;
+let shown = PAGE_SIZE;
+// Deep links: /?triage=<bucket or group>&select=all, /?category=job&kind=channel&sort=oldest&q=текст
+const linkParams = new URLSearchParams(location.search);
+let triageFilter = linkParams.get('triage') || '', selectOnLoad = linkParams.get('select') === 'all';
+let searchHits = {query:'', hits:{}}, searchTimer = null, searchSeq = 0;
 let lastBatchId = localStorage.getItem('tg-crm-batch-id') || '', toastTimer;
 let exportData = null, lastJobError = '', qrPollTimer = null, lastFullRefresh = 0;
 function toast(message, error = false) {
@@ -64,41 +78,102 @@ const initials = title => title.split(/\s+/).slice(0,2).map(x => x[0]).join('').
 const badge = key => `<span class="badge ${key}">${icon(meta[key].icon)}${escapeHTML(meta[key].short || meta[key].label)}</span>`;
 const countLabel = number => `${number} ${number % 10 === 1 && number % 100 !== 11 ? 'чат' : number % 10 >= 2 && number % 10 <= 4 && (number % 100 < 12 || number % 100 > 14) ? 'чата' : 'чатов'}`;
 
+// null: no match. '': matched on the visible fields. Otherwise the snippet of a matching message.
+function searchHit(row, query) {
+  if ([row.title,row.username,row.last_message,row.annotation.notes].some(x => (x || '').toLocaleLowerCase('ru').includes(query))) return '';
+  return searchHits.query === query ? searchHits.hits[row.id] ?? null : null;
+}
+function searchMessages() {
+  clearTimeout(searchTimer);
+  const query = $('#search').value.trim().toLocaleLowerCase('ru'), seq = ++searchSeq;
+  if (query.length < 2) { searchHits = {query:'', hits:{}}; return; }
+  searchTimer = setTimeout(async () => {
+    try {
+      const result = await api(`/api/search?q=${encodeURIComponent(query)}`);
+      if (seq === searchSeq) { searchHits = {query, hits:result.hits}; renderTable(); }
+    } catch (error) { toast(error.message, true); }
+  }, 250);
+}
+// Same order as primary_category on the server: most urgent status first.
+const STATUS_ORDER = ['suspected_scam','important','job','spam','stalled','dead','very_old','inactive','short','active'];
+const statusRank = row => STATUS_ORDER.indexOf(row.primary_category);
+const SORTS = {
+  name:(a,b) => a.title.localeCompare(b.title,'ru'),
+  name_desc:(a,b) => b.title.localeCompare(a.title,'ru'),
+  status:(a,b) => statusRank(a) - statusRank(b),
+  status_desc:(a,b) => statusRank(b) - statusRank(a),
+  // Chats without any messages stay at the end in both date directions.
+  oldest:(a,b) => (a.last_message_at || '9999').localeCompare(b.last_message_at || '9999'),
+  newest:(a,b) => (b.last_message_at || '').localeCompare(a.last_message_at || ''),
+  priority:(a,b) => b.outgoing_30d - a.outgoing_30d || b.recent_messages - a.recent_messages || b.priority_score - a.priority_score,
+  priority_asc:(a,b) => a.outgoing_30d - b.outgoing_30d || a.recent_messages - b.recent_messages || a.priority_score - b.priority_score,
+};
+// Column header -> [sort of the first click, sort of the second click], and the arrow each one shows.
+const COLUMN_SORTS = {name:['name','name_desc'],status:['status','status_desc'],date:['newest','oldest'],frequency:['priority','priority_asc']};
+const ASCENDING = new Set(['name','status','oldest','priority_asc']);
+function renderSortHeaders() {
+  const sort = $('#sort').value;
+  $$('[data-sort-column]').forEach(th => {
+    const active = COLUMN_SORTS[th.dataset.sortColumn].includes(sort);
+    if (active) th.setAttribute('aria-sort', ASCENDING.has(sort) ? 'ascending' : 'descending'); else th.removeAttribute('aria-sort');
+    $('.sort-arrow', th).textContent = active ? (ASCENDING.has(sort) ? '↑' : '↓') : '↕';
+  });
+}
 function visibleRows() {
   if (!state) return [];
   const query = $('#search').value.trim().toLocaleLowerCase('ru');
   const kind = $('#kind-filter').value;
-  let rows = state.chats.filter(row => (category === 'all' || row.categories.includes(category)) && (kind === 'all' || row.kind === kind));
-  if (query) rows = rows.filter(row => [row.title,row.username,row.last_message,row.annotation.notes].some(x => (x || '').toLocaleLowerCase('ru').includes(query)));
-  const sort = $('#sort').value;
-  if (sort === 'name') rows.sort((a,b) => a.title.localeCompare(b.title,'ru'));
-  if (sort === 'oldest') rows.sort((a,b) => (a.last_message_at || '9999').localeCompare(b.last_message_at || '9999'));
-  if (sort === 'newest') rows.sort((a,b) => (b.last_message_at || '').localeCompare(a.last_message_at || ''));
-  if (sort === 'priority') rows.sort((a,b) => b.recent_messages - a.recent_messages || b.priority_score - a.priority_score);
+  let rows = state.chats.filter(row => (triageFilter ? row.triage && (row.triage.bucket === triageFilter || row.triage.group === triageFilter) : category === 'all' || row.categories.includes(category)) && (kind === 'all' || row.kind === kind));
+  if (query) rows = rows.filter(row => searchHit(row, query) !== null);
+  const compare = SORTS[$('#sort').value];
+  if (compare) rows.sort(compare);
   return rows;
 }
-function renderNavigation() {
-  $('#navigation').innerHTML = ['all','important','stalled','suspected_scam','inactive','very_old','dead'].map(key => `<button class="nav-item ${category === key ? 'active' : ''}" data-category="${key}" aria-label="${meta[key].label}" title="${meta[key].label}" ${category === key ? 'aria-current="page"' : ''}><span>${icon(meta[key].icon)}</span><span>${meta[key].label}</span><span class="nav-count">${key === 'all' ? state.chats.length : state.counts[key]}</span></button>`).join('');
-  const captions = {important:'Частота + закрепления + ваши метки',stalled:`>${state.settings.stalled_days} дн. без отмеченного прогресса`,suspected_scam:'Сигналы, которые стоит проверить',very_old:`Последний контакт > ${state.settings.old_months} месяцев`,dead:`> ${state.settings.dead_years} г. без сообщений`};
-  $('#metrics').innerHTML = ['important','stalled','suspected_scam','very_old','dead'].map(key => `<button class="metric ${key} ${category === key ? 'selected' : ''}" data-category="${key}"><span class="metric-top"><span class="metric-icon">${icon(meta[key].icon)}</span>${key === 'stalled' ? 'Знакомства зависли' : meta[key].label}</span><span class="metric-value">${state.counts[key]}</span><span class="metric-sub">${escapeHTML(captions[key])}</span><span class="metric-arrow">↗</span></button>`).join('');
+function triageTitle() {
+  if (!triageFilter || !state.triage) return '';
+  return state.triage.groups[triageFilter] || state.triage.buckets[triageFilter]?.label || 'Разбор';
 }
+function renderTriageNavigation() {
+  const node = $('#triage-navigation'); node.hidden = !state.triage;
+  if (!state.triage) return;
+  const total = group => Object.values(state.triage.buckets).filter(b => b.group === group).reduce((sum, b) => sum + b.count, 0);
+  const icons = {remove:'trash',review:'search',keep:'check'};
+  node.innerHTML = `<p class="nav-heading">РАЗБОР</p>` + Object.entries(state.triage.groups).map(([key,label]) => `<button class="nav-item ${triageFilter === key ? 'active' : ''}" data-triage="${key}" title="${label}"><span>${icon(icons[key])}</span><span>${label}</span><span class="nav-count">${total(key)}</span></button>`).join('');
+}
+function setTriage(key) { triageFilter = key; category = 'all'; shown = PAGE_SIZE; history.replaceState(null,'',`?triage=${encodeURIComponent(key)}`); renderNavigation(); renderTable(); }
+function renderNavigation() {
+  renderTriageNavigation();
+  $('#navigation').innerHTML = ['all','important','job','stalled','suspected_scam','spam','inactive','very_old','dead','short'].map(key => `<button class="nav-item ${!triageFilter && category === key ? 'active' : ''}" data-category="${key}" aria-label="${meta[key].label}" title="${meta[key].label}" ${category === key ? 'aria-current="page"' : ''}><span>${icon(meta[key].icon)}</span><span>${meta[key].label}</span><span class="nav-count">${key === 'all' ? state.chats.length : state.counts[key]}</span></button>`).join('');
+  const captions = {important:'Частота + закрепления + ваши метки',job:'Рекрутеры, вакансии, собеседования',stalled:`>${state.settings.stalled_days} дн. без отмеченного прогресса`,suspected_scam:'Сигналы, которые стоит проверить',very_old:`Последний контакт > ${state.settings.old_months} месяцев`,dead:`> ${state.settings.dead_years} г. без сообщений`,spam:`≥ ${state.settings.spam_streak} входящих подряд без ответа`,short:`< ${state.settings.short_chat_messages} сообщений за всю историю`};
+  $('#metrics').innerHTML = ['important','job','stalled','suspected_scam','spam','short','very_old','dead'].map(key => `<button class="metric ${key} ${category === key ? 'selected' : ''}" data-category="${key}"><span class="metric-top"><span class="metric-icon">${icon(meta[key].icon)}</span>${key === 'stalled' ? 'Знакомства зависли' : meta[key].label}</span><span class="metric-value">${state.counts[key]}</span><span class="metric-sub">${escapeHTML(captions[key])}</span><span class="metric-arrow">↗</span></button>`).join('');
+}
+function resetPage() { shown = PAGE_SIZE; renderTable(); window.scrollTo({top: Math.min(window.scrollY, $('.inbox').offsetTop)}); }
 function renderTable() {
-  const rows = visibleRows();
-  $('#list-title').textContent = meta[category].label;
+  renderSortHeaders();
+  const filtered = visibleRows();
+  const rows = filtered.slice(0, shown);
+  const query = $('#search').value.trim().toLocaleLowerCase('ru');
+  $('#list-title').textContent = triageTitle() || meta[category].label;
   $('#category-filter').value = category;
-  $('#list-caption').textContent = countLabel(rows.length);
+  $('#list-caption').textContent = countLabel(filtered.length);
   $('#chat-rows').innerHTML = rows.map((row,index) => {
     const other = row.categories.filter(c => c !== row.primary_category);
-    const amplitude = Math.min(7, Math.ceil(row.recent_messages / 8));
-    return `<tr class="chat-row ${selected.has(row.id) ? 'selected' : ''}" data-chat-id="${escapeHTML(row.id)}" tabindex="0" aria-label="Открыть чат ${escapeHTML(row.title)}"><td class="check-cell"><input type="checkbox" data-select="${escapeHTML(row.id)}" aria-label="Выбрать ${escapeHTML(row.title)}" ${selected.has(row.id) ? 'checked' : ''}></td><td><div class="chat-person"><div class="avatar ${row.kind} c${index % 4}">${escapeHTML(initials(row.title))}</div><div><div class="chat-name">${escapeHTML(row.title)}${row.pinned ? `<span class="tiny-icon" title="Закреплён">${icon('pin')}</span>` : ''}${row.unread_count ? `<span class="tiny-icon" title="Непрочитанных: ${row.unread_count}">●</span>` : ''}</div><p class="chat-preview">${row.last_outgoing ? 'Вы: ' : ''}${escapeHTML(row.last_message || 'Нет текстовых сообщений')}</p></div></div></td><td>${badge(row.primary_category)}${other.length ? `<div class="secondary-tags">+ ${other.map(c => escapeHTML(meta[c].short)).join(' · ')}</div>` : ''}</td><td class="date-column"><div class="last-date">${escapeHTML(date(row.last_message_at))}</div><div class="idle-text">${row.idle_days === null ? 'Нет истории' : row.idle_days === 0 ? 'Были на связи сегодня' : `${row.idle_days} дн. без общения`}</div></td><td class="frequency-column"><div class="frequency"><div class="frequency-bars" aria-hidden="true">${[0,1,2,3,4,5,6].map((n) => `<i class="bar-${n} ${n < amplitude ? 'on' : ''}"></i>`).join('')}</div><span title="В загруженной истории; может быть нижней оценкой">${row.recent_messages}${row.frequency_is_lower_bound ? '+' : ''}</span></div></td><td class="row-arrow"><button tabindex="-1" aria-label="Открыть карточку">›</button></td></tr>`;
+    const triageTag = triageFilter && row.triage ? `<div class="secondary-tags">${escapeHTML(row.triage.label)}</div>` : '';
+    const amplitude = Math.min(7, Math.ceil(row.outgoing_30d / 4));
+    return `<tr class="chat-row ${selected.has(row.id) ? 'selected' : ''}" data-chat-id="${escapeHTML(row.id)}" tabindex="0" aria-label="Открыть чат ${escapeHTML(row.title)}"><td class="check-cell"><input type="checkbox" data-select="${escapeHTML(row.id)}" aria-label="Выбрать ${escapeHTML(row.title)}" ${selected.has(row.id) ? 'checked' : ''}></td><td><div class="chat-person"><div class="avatar ${row.kind} c${index % 4}">${escapeHTML(initials(row.title))}</div><div><div class="chat-name">${escapeHTML(row.title)}${row.pinned ? `<span class="tiny-icon" title="Закреплён">${icon('pin')}</span>` : ''}${row.unread_count ? `<span class="tiny-icon" title="Непрочитанных: ${row.unread_count}">●</span>` : ''}</div>${(hit => hit ? `<p class="chat-preview search-hit">Найдено: ${escapeHTML(hit)}</p>` : `<p class="chat-preview">${row.last_outgoing ? 'Вы: ' : ''}${escapeHTML(row.last_message || 'Нет текстовых сообщений')}</p>`)(query ? searchHit(row, query) : '')}</div></div></td><td>${badge(row.primary_category)}${other.length ? `<div class="secondary-tags">+ ${other.map(c => escapeHTML(meta[c].short)).join(' · ')}</div>` : ''}${triageTag}</td><td class="date-column"><div class="last-date">${escapeHTML(date(row.last_message_at))}</div><div class="idle-text">${row.idle_days === null ? 'Нет истории' : row.idle_days === 0 ? 'Были на связи сегодня' : `${row.idle_days} дн. без общения`}</div></td><td class="frequency-column"><div class="frequency"><div class="frequency-bars" aria-hidden="true">${[0,1,2,3,4,5,6].map((n) => `<i class="bar-${n} ${n < amplitude ? 'on' : ''}"></i>`).join('')}</div><span title="Ваши сообщения за 30 дней в загруженной истории; всего в чате: ${row.recent_messages}${row.frequency_is_lower_bound ? '+' : ''}. Может быть нижней оценкой">${row.outgoing_30d}${row.frequency_is_lower_bound ? '+' : ''}</span></div></td><td class="row-arrow"><button tabindex="-1" aria-label="Открыть карточку">›</button></td></tr>`;
   }).join('');
-  $('#table-count').textContent = `Показано ${countLabel(rows.length)} из ${state.chats.length}`;
+  $('#table-count').textContent = `Показано ${rows.length} из ${countLabel(filtered.length)}${filtered.length !== state.chats.length ? ` (всего ${state.chats.length})` : ''}${rows.length < filtered.length ? ' · прокрутите, чтобы загрузить ещё' : ''}`;
+  // Header checkbox and "select all" act on every chat matching the category and filters, on all pages.
+  const filteredIds = new Set(filtered.map(row => row.id));
+  const selectedHere = [...selected].filter(id => filteredIds.has(id)).length, hidden = selected.size - selectedHere;
   $('#batch-bar').hidden = selected.size === 0;
-  $('#selection-count').textContent = `Выбрано: ${selected.size} / 50`;
-  const allSelected = rows.length > 0 && rows.slice(0,50).every(row => selected.has(row.id));
+  $('#selection-count').textContent = `Выбрано: ${selected.size}${hidden ? ` · вне текущего фильтра: ${hidden}` : ''}${selected.size > 2000 ? ' · для LLM — до 2000' : ''}`;
+  const allSelected = filtered.length > 0 && selectedHere === filtered.length;
   $('#select-all').checked = allSelected;
-  $('#select-all').indeterminate = !allSelected && rows.some(row => selected.has(row.id));
-  const empty = $('#empty-state'); empty.hidden = rows.length > 0;
+  $('#select-all').indeterminate = !allSelected && selectedHere > 0;
+  $('#select-filtered-label').textContent = allSelected ? `Снять выбор по фильтру (${filtered.length})` : `Выбрать все по фильтру (${filtered.length})`;
+  $('#select-filtered').disabled = filtered.length === 0;
+  const empty = $('#empty-state'); empty.hidden = filtered.length > 0;
   if (!rows.length) empty.innerHTML = state.chats.length ? `<div class="empty-icon">${icon('search')}</div><h3>Здесь пока тихо</h3><p>Чатов по выбранному фильтру нет. Попробуйте другую категорию или измените поиск.</p>` : `<div class="empty-icon">${icon('inbox')}</div><h3>Начнём с ваших диалогов</h3><p>Подключите Telegram для анализа переписок или посмотрите, как всё работает, на демонстрационных данных.</p><div class="empty-actions"><button class="button primary" data-action="connect">${icon('send')}Подключить Telegram</button><button class="button" data-action="demo">Посмотреть демо</button></div>`;
 }
 function render() {
@@ -106,13 +181,14 @@ function render() {
   renderNavigation(); renderTable();
   $('#connection-text').textContent = state.telegram.authorized ? state.telegram.account?.title || 'Telegram подключён' : 'Подключить Telegram';
   $('#workspace-caption').textContent = state.demo ? 'Демонстрационный режим' : state.telegram.authorized ? 'Аккаунт подключён' : 'Локальная CRM';
+  $('#llm-nav .new-label').textContent = `${state.settings.llm_messages_per_chat} сообщ.`;
   $('#notice').hidden = !state.demo;
   if (state.demo) $('#notice').innerHTML = `<span>${icon('info')}</span><span><strong>Демонстрационный режим.</strong> Все имена и сообщения вымышлены. Подключите аккаунт, чтобы увидеть свои чаты.</span><button data-action="connect">Подключить Telegram ↗</button>`;
   $('#scan-caption').textContent = state.last_scan_at ? `${state.demo ? 'Демо обновлено' : 'Обновлено'} ${timeFormat.format(new Date(state.last_scan_at))}` : 'Ещё не синхронизировано';
   const scan = state.scan, llm = state.llm_job;
   $('#scan-button').disabled = scan.running;
   $('#full-scan-button').disabled = scan.running || !state.telegram.authorized;
-  $('#scan-button').innerHTML = `${icon('refresh')}${scan.running ? 'Сканирование…' : 'Обновить чаты'}`;
+  $('#scan-button').innerHTML = `${icon('refresh')}${scan.running ? 'Выполняется…' : 'Обновить чаты'}`;
   const job = $('#job-status'); job.hidden = !(scan.running || llm.running || scan.error || llm.error);
   job.classList.toggle('error', !!(scan.error || llm.error));
   if (!job.hidden) job.innerHTML = `<span>${escapeHTML(scan.error || llm.error || (scan.running ? `${scan.message} · ${scan.done}/${scan.total || '…'}` : `LLM: проанализировано ${llm.done} из ${llm.total}`))}</span>${scan.running ? '<button data-action="cancel-scan">Остановить</button>' : ''}`;
@@ -122,9 +198,10 @@ function render() {
 async function refresh() {
   const incoming = await api('/api/state'); state = incoming; lastFullRefresh = Date.now();
   const ids = new Set(state.chats.map(c => c.id)); selected = new Set([...selected].filter(id => ids.has(id)));
+  if (selectOnLoad) { selectOnLoad = false; visibleRows().forEach(row => selected.add(row.id)); }
   render();
 }
-function setCategory(key) { category = key; renderNavigation(); renderTable(); }
+function setCategory(key) { if (triageFilter) { triageFilter = ''; history.replaceState(null,'',location.pathname); } category = key; shown = PAGE_SIZE; renderNavigation(); renderTable(); }
 function modal(title, content) {
   $('#modal-title').textContent = title; $('#modal-body').innerHTML = content;
   if (!$('#modal').open) $('#modal').showModal();
@@ -139,18 +216,22 @@ async function openDetail(chatId) {
   const row = detailData, a = row.annotation;
   const options = (values, current) => Object.entries(values).map(([v,label]) => `<option value="${v}" ${String(current ?? 'auto') === v ? 'selected' : ''}>${label}</option>`).join('');
   const ai = row.llm?.result;
-  $('#detail').innerHTML = `<div class="detail-top"><span>КАРТОЧКА ПЕРЕПИСКИ</span><button class="icon-button" data-detail-action="close" aria-label="Закрыть карточку">${icon('close')}</button></div><div class="detail-person"><div class="avatar">${escapeHTML(initials(row.title))}</div><div><h2>${escapeHTML(row.title)}</h2><p>${({user:'Личный чат',group:'Группа',channel:'Канал',bot:'Бот'})[row.kind]}${row.archived ? ' · В архиве' : ''}${row.demo ? ' · Демо' : ''}</p></div></div><div class="detail-badges">${row.categories.map(badge).join('')}</div><div class="detail-stat"><div><strong>${row.recent_messages}${row.frequency_is_lower_bound ? '+' : ''}</strong><small>сообщений / 30 дней</small></div><div><strong>${row.idle_days ?? '—'}</strong><small>дней без общения</small></div><div><strong>${row.loaded_messages}</strong><small>сообщений загружено</small></div></div><h3>Почему чат выделен</h3><ul class="reason-list">${(row.reasons.length ? row.reasons : ['Специальных сигналов не обнаружено']).map(reason => `<li>${escapeHTML(reason)}</li>`).join('')}</ul>${ai ? `<h3>Анализ LLM${row.llm_stale ? ' · УСТАРЕЛ' : ''}</h3><div class="llm-result"><strong>${escapeHTML(row.llm.source)} · уверенность ${Math.round(ai.confidence*100)}%</strong><p>${escapeHTML(ai.reason)}</p><div>${escapeHTML(ai.suggested_action)}</div><small>Сообщения: ${ai.evidence_message_ids.map(escapeHTML).join(', ') || 'нет ссылок'}</small></div>` : ''}<h3>Ваши отметки</h3><form id="annotation-form"><div class="detail-form"><label class="field">Важность<select name="important">${options({auto:'Автоматически',true:'Важный',false:'Не важный'},a.important)}</select></label><label class="field">Знакомство<select name="dating">${options({auto:'Определить по контексту',true:'Да, знакомство',false:'Нет'},a.dating)}</select></label><label class="field">Этап<select name="stage">${options({new:'Без этапа',talking:'Общаемся',meeting_planned:'Планируем встречу',met:'Встретились',relationship:'Отношения',closed:'Завершено'},a.stage)}</select></label><label class="field">Последний прогресс<input name="last_progress_at" type="date" value="${a.last_progress_at ? moscowDate(a.last_progress_at) : ''}"></label><label class="field full">Проверка подозрения<select name="risk_review">${options({auto:'Автоматические сигналы',trusted:'Проверено, доверяю',scam:'Подозрение подтверждено мной'},a.risk_review)}</select></label><label class="field full">Заметка<textarea name="notes" placeholder="Контекст, договорённости, что важно помнить…">${escapeHTML(a.notes)}</textarea></label><label class="field full">Ваш черновик ответа<textarea name="reply_draft" placeholder="Напишите ответ. Его можно скопировать в Telegram.">${escapeHTML(a.reply_draft)}</textarea></label></div><div class="form-actions"><button type="button" class="button" data-detail-action="copy-reply">${icon('copy')}Копировать ответ</button><button class="button primary" type="submit">Сохранить</button></div></form><h3>Последние сообщения</h3><div class="message-history">${row.messages.slice(-30).map(message => `<div class="message ${message.outgoing ? 'outgoing' : ''}" id="message-${message.id}">${message.forwarded ? '[Переслано] ' : ''}${escapeHTML(message.text || `[${message.media || 'Медиа'}]`)}<small>${message.outgoing ? 'Вы' : 'Входящее'} · ${timeFormat.format(new Date(message.date))} · #${message.id}</small></div>`).join('') || '<p class="field-hint">Нет доступной истории</p>'}</div><div class="details-link">${row.demo ? '<span class="field-hint">Демонстрационный чат — переход в Telegram недоступен</span>' : `<a class="button" href="${escapeHTML(row.telegram_url)}">${icon('send')}Открыть в Telegram ↗</a>`}</div>`;
+  $('#detail').innerHTML = `<div class="detail-top"><span>КАРТОЧКА ПЕРЕПИСКИ</span><button class="icon-button" data-detail-action="close" aria-label="Закрыть карточку">${icon('close')}</button></div><div class="detail-person"><div class="avatar">${escapeHTML(initials(row.title))}</div><div><h2>${escapeHTML(row.title)}</h2><p>${({user:'Личный чат',group:'Группа',channel:'Канал',bot:'Бот'})[row.kind]}${row.archived ? ' · В архиве' : ''}${row.demo ? ' · Демо' : ''}</p></div></div><div class="detail-badges">${row.categories.map(badge).join('')}</div><div class="detail-stat"><div><strong>${row.recent_messages}${row.frequency_is_lower_bound ? '+' : ''}</strong><small>сообщений / 30 дней</small></div><div><strong>${row.idle_days ?? '—'}</strong><small>дней без общения</small></div><div><strong>${row.loaded_messages}</strong><small>сообщений загружено</small></div></div><h3>Почему чат выделен</h3><ul class="reason-list">${(row.reasons.length ? row.reasons : ['Специальных сигналов не обнаружено']).map(reason => `<li>${escapeHTML(reason)}</li>`).join('')}</ul>${ai ? `<h3>Анализ LLM${row.llm_stale ? ' · УСТАРЕЛ' : ''}</h3><div class="llm-result"><strong>${escapeHTML(row.llm.source)} · уверенность ${Math.round(ai.confidence*100)}%</strong><p>${escapeHTML(ai.reason)}</p><div>${escapeHTML(ai.suggested_action)}</div><small>Сообщения: ${ai.evidence_message_ids.map(escapeHTML).join(', ') || 'нет ссылок'}</small></div>` : ''}<h3>Ваши отметки</h3><form id="annotation-form"><div class="detail-form"><label class="field">Важность<select name="important">${options({auto:'Автоматически',true:'Важный',false:'Не важный'},a.important)}</select></label><label class="field">Знакомство<select name="dating">${options({auto:'Определить по контексту',true:'Да, знакомство',false:'Нет'},a.dating)}</select></label><label class="field">Работа и вакансии<select name="job">${options({auto:'Определить по словам',true:'Да, про работу',false:'Нет'},a.job)}</select></label><label class="field">Этап<select name="stage">${options({new:'Без этапа',talking:'Общаемся',meeting_planned:'Планируем встречу',met:'Встретились',kissed:'Поцеловались',sex_protected:'Занялись защищённым сексом',sex_unprotected:'Занялись незащищённым сексом',regular_partner:'Постоянный половой партнёр',relationship:'Отношения',closed:'Завершено'},a.stage)}</select></label><label class="field">Последний прогресс<input name="last_progress_at" type="date" value="${a.last_progress_at ? moscowDate(a.last_progress_at) : ''}"></label><label class="field full">Проверка подозрения<select name="risk_review">${options({auto:'Автоматические сигналы',trusted:'Проверено, доверяю',scam:'Подозрение подтверждено мной'},a.risk_review)}</select></label><label class="field full">Заметка<textarea name="notes" placeholder="Контекст, договорённости, что важно помнить…">${escapeHTML(a.notes)}</textarea></label><label class="field full">Ваш черновик ответа<textarea name="reply_draft" placeholder="Напишите ответ. Его можно скопировать в Telegram.">${escapeHTML(a.reply_draft)}</textarea></label></div><div class="form-actions"><button type="button" class="button" data-detail-action="copy-reply">${icon('copy')}Копировать ответ</button><button class="button primary" type="submit">Сохранить</button></div></form><h3>Последние сообщения</h3><div class="message-history">${row.messages.slice(-30).map(message => `<div class="message ${message.outgoing ? 'outgoing' : ''}" id="message-${message.id}">${chatMedia.fetchable.has(message.media) ? `<div class="media-slot" data-media-id="${message.id}"></div>` : ''}${message.forwarded ? '[Переслано] ' : ''}${message.text ? escapeHTML(message.text) : `<span class="media-label">[${escapeHTML(message.media || 'Медиа')}]</span>`}<small>${message.outgoing ? 'Вы' : 'Входящее'} · ${timeFormat.format(new Date(message.date))} · #${message.id}</small></div>`).join('') || '<p class="field-hint">Нет доступной истории</p>'}</div>${chatExport.markup(row.loaded_messages, row.demo)}${row.demo ? '' : `<div class="export-buttons"><button type="button" class="export-button remove-chat" id="remove-chat">${chatExport.removeLabel(row.kind)}</button></div>`}<div class="details-link">${row.demo ? '<span class="field-hint">Демонстрационный чат — переход в Telegram недоступен</span>' : `<a class="button" href="${escapeHTML(row.telegram_url)}">${icon('send')}Открыть в Telegram ↗</a>`}</div>`;
   $('#detail').hidden = false; $('#drawer-scrim').hidden = false;
   $('#annotation-form').onsubmit = event => {
     event.preventDefault();
     action(async () => {
       const form = new FormData(event.target);
       const tri = value => value === 'auto' ? null : value === 'true';
-      const annotation = {important:tri(form.get('important')),dating:tri(form.get('dating')),stage:form.get('stage'),risk_review:form.get('risk_review'),notes:form.get('notes'),reply_draft:form.get('reply_draft'),last_progress_at:form.get('last_progress_at') ? `${form.get('last_progress_at')}T00:00:00+03:00` : null};
+      const annotation = {important:tri(form.get('important')),dating:tri(form.get('dating')),job:tri(form.get('job')),stage:form.get('stage'),risk_review:form.get('risk_review'),notes:form.get('notes'),reply_draft:form.get('reply_draft'),last_progress_at:form.get('last_progress_at') ? `${form.get('last_progress_at')}T00:00:00+03:00` : null};
       await api(`/api/chats/${encodeURIComponent(chatId)}/annotation`,{method:'PUT',body:JSON.stringify(annotation)});
       toast('Отметки и черновик сохранены'); await refresh(); await openDetail(chatId);
     }, $('button[type=submit]',event.target));
   };
+  chatExport.bind($('#detail'), chatId, api, toast);
+  const removeButton = $('#remove-chat');
+  if (removeButton) removeButton.onclick = () => action(async () => cleanupModal([chatId], row.title, true));
+  chatMedia.fill({root: $('#detail'), chatId, request: api, isCurrent: () => detailId === chatId, downloadIcon: icon('download')});
   const history = $('.message-history',$('#detail')); history.scrollTop = history.scrollHeight;
 }
 function closeDetail() { $('#detail').hidden = true; $('#drawer-scrim').hidden = true; detailId = null; }
@@ -218,13 +299,14 @@ function connect(step = state?.telegram.step === 'qr' ? 'qr' : state?.telegram.s
 function settingsModal() {
   const s = state.settings;
   const number = (name,label,value,min=1,max=3650) => `<label class="field">${label}<input type="number" name="${name}" value="${value}" min="${min}" max="${max}" required></label>`;
-  modal('Настройки анализа',`<form id="settings-form"><p class="modal-copy">Порог важности основан на взаимном общении в загруженной истории за 30 дней. Закрепления и ручные отметки дополняют частоту.</p><div class="modal-grid">${number('frequent_messages','Важный: сообщений / 30 дней',s.frequent_messages,4,1000)}${number('history_limit','Загружать сообщений на чат',s.history_limit,20,500)}${number('stalled_days','Знакомство без прогресса, дней',s.stalled_days)}${number('inactive_days','Неактивный чат, дней',s.inactive_days)}${number('old_months','Очень старый, месяцев',s.old_months,1,120)}${number('dead_years','Мёртвый чат, лет',s.dead_years,1,20)}${number('scan_interval_hours','Обновлять каждые N часов (0 = вручную)',s.scan_interval_hours,0,720)}</div><h3 class="modal-section">LLM через OpenAI API</h3><p class="field-hint">API-ключ ${state.llm_configured ? 'сохранён' : 'не настроен'}. Выбранные сообщения передаются OpenAI; API оплачивается отдельно. Копирование пачек работает без API-ключа.</p><div class="modal-grid"><label class="field full">OpenAI API key (оставьте пустым, чтобы сохранить текущий)<input type="password" name="api_key" autocomplete="off" placeholder="sk-…"></label><label class="field">Модель<input name="llm_model" value="${escapeHTML(s.llm_model)}" required maxlength="120"></label>${number('llm_max_chats','Максимум чатов после обновления',s.llm_max_chats,1,50)}</div><label class="checkbox-field"><input type="checkbox" name="redact_contacts" ${s.redact_contacts ? 'checked' : ''}>Скрывать имена в заголовках, телефоны, email и @username при экспорте. Сам текст может содержать другие личные сведения.</label><label class="checkbox-field"><input type="checkbox" name="llm_after_scan" ${s.llm_after_scan ? 'checked' : ''}>После обновления автоматически отправлять в OpenAI остальные чаты без свежего анализа, до указанного лимита. Возможны расходы API.</label><p class="field-hint">Обновление по расписанию работает, пока запущен локальный сервер; вкладку браузера можно закрыть. Выключенный Mac не выполняет анализ.</p><div class="form-actions"><button type="button" class="button" id="setup-help">Инструкция по API</button><button class="button primary" type="submit">Сохранить настройки</button></div></form>`);
+  modal('Настройки анализа',`<form id="settings-form"><p class="modal-copy">Порог важности основан на взаимном общении в загруженной истории за 30 дней. Закрепления и ручные отметки дополняют частоту.</p><div class="modal-grid">${number('frequent_messages','Важный: сообщений / 30 дней',s.frequent_messages,4,1000)}${number('history_limit','Загружать сообщений на чат',s.history_limit,20,500)}${number('spam_streak','Спам: входящих подряд без ответа',s.spam_streak,5,500)}${number('short_chat_messages','Ультракороткий: меньше сообщений всего',s.short_chat_messages,2,500)}${number('stalled_days','Знакомство без прогресса, дней',s.stalled_days)}${number('inactive_days','Неактивный чат, дней',s.inactive_days)}${number('old_months','Очень старый, месяцев',s.old_months,1,120)}${number('dead_years','Мёртвый чат, лет',s.dead_years,1,20)}${number('scan_interval_hours','Обновлять каждые N часов (0 = вручную)',s.scan_interval_hours,0,720)}</div><h3 class="modal-section">LLM: OpenAI или Anthropic</h3><p class="field-hint">Модели <code>claude-…</code> идут в Anthropic API, остальные — в OpenAI. Выбранные сообщения передаются провайдеру; API оплачивается отдельно. Копирование пачек работает без ключа.</p><div class="modal-grid"><label class="field">Модель<input name="llm_model" list="llm-models" value="${escapeHTML(s.llm_model)}" required maxlength="120"><datalist id="llm-models"><option value="gpt-6-luna">OpenAI</option><option value="claude-haiku-5-5">Anthropic · Claude Haiku 5.5</option></datalist></label>${number('llm_messages_per_chat','Сообщений из каждого чата',s.llm_messages_per_chat,5,500)}<label class="field">OpenAI API key ${state.llm_keys.openai ? '(сохранён)' : '(не настроен)'}<input type="password" name="openai_key" autocomplete="off" placeholder="оставьте пустым — без изменений"></label><label class="field">Anthropic API key ${state.llm_keys.anthropic ? '(сохранён)' : '(не настроен)'}<input type="password" name="anthropic_key" autocomplete="off" placeholder="оставьте пустым — без изменений"></label><label class="field">Цена входа, $ / 1M токенов<input type="number" name="llm_price_input_per_m" min="0" max="1000" step="0.01" value="${s.llm_price_input_per_m ?? ''}" placeholder="для оценки стоимости"></label><label class="field">Цена выхода, $ / 1M токенов<input type="number" name="llm_price_output_per_m" min="0" max="1000" step="0.01" value="${s.llm_price_output_per_m ?? ''}" placeholder="для оценки стоимости"></label>${number('llm_max_chats','Максимум чатов после обновления',s.llm_max_chats,1,2000)}</div><p class="field-hint">Цены нужны только для оценки перед запуском. Для claude-haiku-5-5 без указанных цен используются $0.10 / $0.50.</p><label class="checkbox-field"><input type="checkbox" name="redact_contacts" ${s.redact_contacts ? 'checked' : ''}>Скрывать имена в заголовках, телефоны, email и @username при экспорте. Сам текст может содержать другие личные сведения.</label><label class="checkbox-field"><input type="checkbox" name="llm_after_scan" ${s.llm_after_scan ? 'checked' : ''}>После обновления автоматически отправлять в OpenAI остальные чаты без свежего анализа, до указанного лимита. Возможны расходы API.</label><p class="field-hint">Обновление по расписанию работает, пока запущен локальный сервер; вкладку браузера можно закрыть. Выключенный Mac не выполняет анализ.</p><div class="form-actions"><button type="button" class="button" id="setup-help">Инструкция по API</button><button class="button primary" type="submit">Сохранить настройки</button></div></form>`);
   $('#setup-help').onclick = setupHelp;
   $('#settings-form').onsubmit = event => { event.preventDefault(); action(async () => {
     const form = new FormData(event.target), settings = {...s};
-    for (const key of ['stalled_days','inactive_days','old_months','dead_years','frequent_messages','history_limit','scan_interval_hours','llm_max_chats']) settings[key] = Number(form.get(key));
+    for (const key of ['stalled_days','inactive_days','old_months','dead_years','frequent_messages','history_limit','spam_streak','short_chat_messages','scan_interval_hours','llm_max_chats','llm_messages_per_chat']) settings[key] = Number(form.get(key));
+    for (const key of ['llm_price_input_per_m','llm_price_output_per_m']) settings[key] = form.get(key) === '' ? null : Number(form.get(key));
     settings.llm_model = form.get('llm_model').trim(); settings.redact_contacts = form.has('redact_contacts'); settings.llm_after_scan = form.has('llm_after_scan');
-    const key = form.get('api_key').trim(); if (key) await api('/api/llm/key',{method:'PUT',body:JSON.stringify({api_key:key})});
+    for (const provider of ['openai','anthropic']) { const key = form.get(`${provider}_key`).trim(); if (key) await api('/api/llm/key',{method:'PUT',body:JSON.stringify({api_key:key,provider})}); }
     await api('/api/settings',{method:'PUT',body:JSON.stringify(settings)});
     closeModal(); await refresh(); toast('Настройки сохранены');
   },$('button[type=submit]',event.target)); };
@@ -234,15 +316,44 @@ function setupHelp() {
   $('#help-connect').onclick = () => connect();
 }
 
+function cleanupModal(ids, source, single = false) {
+  const rows = state.chats.filter(row => ids.includes(row.id) && !row.demo);
+  if (!rows.length) throw Error('Нет чатов для очистки');
+  if (!state.telegram.authorized) throw Error('Сначала подключите Telegram');
+  const isImportant = row => row.categories.includes('important');
+  const leave = rows.filter(row => ['channel','group'].includes(row.kind)), remove = rows.filter(row => ['user','bot'].includes(row.kind));
+  const important = rows.filter(isImportant);
+  modal('Отписаться / удалить чаты',`<p class="modal-copy">${escapeHTML(source)}: ${countLabel(rows.length)}. Каждый диалог удаляется одним действием Telegram.</p>
+  <form id="cleanup-form">
+  <label class="checkbox-field"><input type="checkbox" name="unfollow" ${leave.length ? 'checked' : 'disabled'}>Отписаться от каналов и выйти из групп — ${countLabel(leave.filter(r=>!isImportant(r)).length)}</label>
+  <label class="checkbox-field"><input type="checkbox" name="delete" ${remove.length ? (single ? 'checked' : '') : 'disabled'}>Удалить личные чаты и ботов <strong>только у себя</strong> — ${countLabel(remove.filter(r=>!isImportant(r)).length)}. У собеседника переписка останется.</label>
+  ${important.length ? `<label class="checkbox-field"><input type="checkbox" name="include_important">Включить важные и закреплённые (${important.length}) — по умолчанию они пропускаются</label>` : ''}
+  <p class="field-hint">Перед удалением каждого чата его полная текстовая история (до 20 000 сообщений, без медиафайлов) сохраняется в <code>.data/backups/&lt;дата&gt;/</code> как JSON и TXT, плюс снимок всей базы CRM. Если копию сделать не удалось, чат не трогается. Действие в Telegram необратимо.</p>
+  <label class="checkbox-field"><input type="checkbox" name="confirm" required>Понимаю: выбранные чаты исчезнут из моего Telegram</label>
+  <div class="form-actions"><button type="button" class="button" id="cleanup-cancel">Отмена</button><button class="button danger-solid" type="submit">Сделать копию и очистить</button></div></form>`);
+  $('#cleanup-cancel').onclick = closeModal;
+  $('#cleanup-form').onsubmit = event => { event.preventDefault(); action(async () => {
+    const form = new FormData(event.target);
+    const body = {chat_ids: rows.map(r => r.id), unfollow: form.has('unfollow'), delete: form.has('delete'), include_important: form.has('include_important')};
+    if (!body.unfollow && !body.delete) throw Error('Выберите хотя бы одно действие');
+    const result = await api('/api/cleanup',{method:'POST',body:JSON.stringify(body)});
+    closeModal();
+    if (single) { selected.delete(ids[0]); closeDetail(); } else selected.clear();
+    toast(`Очистка запущена: ${countLabel(result.planned)}${result.skipped.important ? `, важных пропущено: ${result.skipped.important}` : ''}`);
+    await refresh();
+  }, event.submitter); };
+}
 function requireSelection() { if (!selected.size) throw Error('Сначала выберите чаты флажками в таблице'); return [...selected]; }
+const LLM_MAX_CHATS = 2000;
+function requireLLMSelection() { const ids = requireSelection(); if (ids.length > LLM_MAX_CHATS) throw Error(`Для LLM — до ${LLM_MAX_CHATS} чатов за раз, выбрано ${ids.length}`); return ids; }
 async function exportBatch() {
-  const ids = requireSelection();
+  const ids = requireLLMSelection();
   exportData = await api('/api/batches/export',{method:'POST',body:JSON.stringify({chat_ids:ids,redact_contacts:state.settings.redact_contacts})});
   lastBatchId = exportData.batch_id; localStorage.setItem('tg-crm-batch-id',lastBatchId);
   const counts = exportData.message_counts;
-  modal('Пачка для анализа LLM',`<p class="modal-copy">${countLabel(exportData.count)}, ${counts.reduce((a,b)=>a+b,0)} сообщений. Из каждого чата взято до 20 последних сообщений, от старых к новым. ${counts.some(n=>n<20) ? 'В некоторых чатах доступно меньше 20 сообщений.' : ''}</p><label class="field">Диалоги, промпт и схема ответа<textarea id="export-prompt" class="modal-prompt" readonly></textarea></label><p class="field-hint">Вставьте в выбранную LLM. Затем скопируйте её JSON-ответ и нажмите «Импорт ответа». Идентификатор пачки сохранён в этом браузере на 7 дней.</p><div class="form-actions"><button class="button" id="export-to-import">Импорт ответа</button><button class="button primary" id="copy-export">${icon('copy')}Копировать пачку</button></div>`);
+  modal('Пачка для анализа LLM',`<p class="modal-copy">${countLabel(exportData.count)}, ${counts.reduce((a,b)=>a+b,0)} сообщений. Из каждого чата взято до ${state.settings.llm_messages_per_chat} последних сообщений, от старых к новым. ${counts.some(n=>n<state.settings.llm_messages_per_chat) ? 'В некоторых чатах сообщений меньше.' : ''}</p><label class="field">Диалоги, промпт и схема ответа<textarea id="export-prompt" class="modal-prompt" readonly></textarea></label><p class="field-hint">Вставьте в выбранную LLM. Затем скопируйте её JSON-ответ и нажмите «Импорт ответа». Идентификатор пачки сохранён в этом браузере на 7 дней.</p><div class="form-actions"><button class="button" id="export-to-import">Импорт ответа</button><button class="button primary" id="copy-export">${icon('copy')}Копировать пачку</button></div>`);
   $('#export-prompt').value = exportData.prompt;
-  $('#copy-export').onclick = () => action(async () => { try { await navigator.clipboard.writeText(exportData.prompt); } catch { $('#export-prompt').select(); if (!document.execCommand('copy')) throw Error('Выделите и скопируйте текст вручную'); } toast('Пачка скопирована: по 20 последних сообщений'); });
+  $('#copy-export').onclick = () => action(async () => { try { await navigator.clipboard.writeText(exportData.prompt); } catch { $('#export-prompt').select(); if (!document.execCommand('copy')) throw Error('Выделите и скопируйте текст вручную'); } toast('Пачка скопирована'); });
   $('#export-to-import').onclick = importModal;
   try { await navigator.clipboard.writeText(exportData.prompt); toast('Диалоги и промпт скопированы'); } catch { /* The explicit copy button retains browser user activation. */ }
 }
@@ -256,21 +367,31 @@ function importModal() {
     if (detailId) await openDetail(detailId);
   },$('button[type=submit]',event.target)); };
 }
-function llmModal() {
-  if (!selected.size) { modal('Анализ остальных чатов',`<p class="modal-copy">Сначала выберите чаты в таблице. Кнопка «Выбрать остальные для LLM» отмечает до 50 чатов, которые ещё не важные и не имеют свежего LLM-анализа.</p><p class="modal-copy">Можно скопировать по 20 последних сообщений с готовым промптом и импортировать JSON-ответ любой LLM. Или настроить OpenAI API и запускать анализ прямо здесь.</p><div class="form-actions"><button class="button" id="llm-import-any">Импорт ответа</button><button class="button primary" id="llm-select-remaining">Выбрать остальные</button></div>`); $('#llm-select-remaining').onclick=()=>{closeModal();selectRemaining();}; $('#llm-import-any').onclick=importModal; return; }
-  modal('Анализ выбранных чатов',`<p class="modal-copy">Выбрано ${countLabel(selected.size)}. Сервис передаст OpenAI до 20 последних сообщений из каждого чата. Модель: <strong>${escapeHTML(state.settings.llm_model)}</strong>. Запросы выполняются частями по 5 чатов и оплачиваются через ваш API-аккаунт.</p><p class="field-hint">${state.settings.redact_contacts ? 'Имена заголовков, телефоны, email и @username скрываются; другие личные сведения могут оставаться в тексте.' : 'Выключено скрытие имён и контактных данных.'} Результаты станут рекомендациями. Ручные отметки имеют приоритет.</p><div class="form-actions"><button class="button" id="llm-copy-instead">Копировать для любой LLM</button><button class="button primary" id="llm-run">${state.llm_configured ? 'Отправить в OpenAI' : 'Настроить API-ключ'}</button></div>`);
+async function llmModal() {
+  if (!selected.size) { modal('Анализ остальных чатов',`<p class="modal-copy">Сначала выберите чаты в таблице. Кнопка «Выбрать остальные для LLM» отмечает чаты, которые ещё не важные и не имеют свежего LLM-анализа (до ${LLM_MAX_CHATS}).</p><p class="modal-copy">Можно скопировать последние сообщения с готовым промптом и импортировать JSON-ответ любой LLM. Или настроить ключ OpenAI / Anthropic и запускать анализ прямо здесь.</p><div class="form-actions"><button class="button" id="llm-import-any">Импорт ответа</button><button class="button primary" id="llm-select-remaining">Выбрать остальные</button></div>`); $('#llm-import-any').onclick=importModal; $('#llm-select-remaining').onclick=()=>{closeModal();selectRemaining();}; return; }
+  const ids = requireLLMSelection();
+  const fmt = n => Math.round(n).toLocaleString('ru-RU');
+  const e = await api('/api/llm/estimate',{method:'POST',body:JSON.stringify({chat_ids:ids,redact_contacts:state.settings.redact_contacts})});
+  const provider = e.provider === 'anthropic' ? 'Anthropic' : 'OpenAI', keyReady = state.llm_keys[e.provider];
+  const cost = e.cost_usd === null ? 'стоимость: укажите цены модели в настройках' : `≈ $${e.cost_usd.toFixed(2)}`;
+  modal('Анализ выбранных чатов',`<p class="modal-copy">Выбрано ${countLabel(e.chats)}: ${fmt(e.messages)} сообщений (до ${e.messages_per_chat} из чата). Модель <strong>${escapeHTML(e.model)}</strong> через ${provider}.</p>
+  <div class="folder-row"><span>Запросов</span><span>${e.requests} по ${e.chunk_size} чатов, ${e.parallel} параллельно</span></div>
+  <div class="folder-row"><span>Токенов на входе / выходе</span><span>≈ ${fmt(e.input_tokens)} / ≈ ${fmt(e.output_tokens)}</span></div>
+  <div class="folder-row"><span>Оценка</span><span>${cost}</span></div>
+  <p class="field-hint">Оценка приблизительная (±30%). ${state.settings.redact_contacts ? 'Имена заголовков, телефоны, email и @username скрываются; другие личные сведения могут оставаться в тексте.' : 'Скрытие имён и контактов выключено.'} Неудачная часть не сохраняется, остальные продолжают. Ручные отметки имеют приоритет.${e.copy_paste_ok ? '' : ' Для копирования в чат LLM пачка слишком большая — используйте API.'}</p>
+  <div class="form-actions"><button class="button" id="llm-copy-instead" ${e.copy_paste_ok ? '' : 'disabled'}>Скопировать вместо API</button><button class="button primary" id="llm-run">${keyReady ? 'Запустить анализ' : `Добавить ключ ${provider}`}</button></div>`);
   $('#llm-copy-instead').onclick = () => action(exportBatch);
   $('#llm-run').onclick = event => action(async () => {
-    if (!state.llm_configured) return settingsModal();
-    await api('/api/llm/analyze',{method:'POST',body:JSON.stringify({chat_ids:requireSelection(),redact_contacts:state.settings.redact_contacts})});
+    if (!keyReady) return settingsModal();
+    await api('/api/llm/analyze',{method:'POST',body:JSON.stringify({chat_ids:ids,redact_contacts:state.settings.redact_contacts})});
     closeModal(); toast('Анализ LLM запущен'); await refresh();
   },event.currentTarget);
 }
 function selectRemaining() {
   const candidates = state.chats.filter(row => !row.categories.includes('important') && (!row.llm || row.llm_stale) && row.loaded_messages);
   if (!candidates.length) return toast('Нет чатов, которым нужен новый анализ');
-  selected = new Set(candidates.slice(0,50).map(row=>row.id)); category='all'; $('#search').value=''; $('#kind-filter').value='all'; render();
-  toast(`Выбрано ${selected.size}${candidates.length>50 ? ` из ${candidates.length}; остальные можно обработать следующей пачкой` : ''}`);
+  selected = new Set(candidates.slice(0,LLM_MAX_CHATS).map(row=>row.id)); category='all'; shown=PAGE_SIZE; $('#search').value=''; $('#kind-filter').value='all'; render();
+  toast(`Выбрано ${selected.size}${candidates.length>LLM_MAX_CHATS ? ` из ${candidates.length}; остальные можно обработать следующей пачкой` : ''}`);
 }
 async function foldersModal() {
   const plan = await api('/api/folders/plan');
@@ -281,6 +402,8 @@ async function foldersModal() {
 }
 
 document.addEventListener('click', event => {
+  const triageButton = event.target.closest('[data-triage]');
+  if (triageButton) setTriage(triageButton.dataset.triage);
   const categoryButton = event.target.closest('[data-category]');
   if (categoryButton) setCategory(categoryButton.dataset.category);
   const button=event.target.closest('[data-action]');
@@ -292,30 +415,42 @@ document.addEventListener('click', event => {
 $('#chat-rows').addEventListener('click',event=>{
   const checkbox=event.target.closest('[data-select]');
   if (checkbox) {
-    if (checkbox.checked) { if (selected.size>=50) {checkbox.checked=false;return toast('В одной пачке — до 50 чатов',true);} selected.add(checkbox.dataset.select); }
+    if (checkbox.checked) selected.add(checkbox.dataset.select);
     else selected.delete(checkbox.dataset.select);
     renderTable();return;
   }
   const row=event.target.closest('[data-chat-id]'); if(row) action(()=>openDetail(row.dataset.chatId));
 });
 $('#chat-rows').addEventListener('keydown',event=>{if(event.target.matches('.chat-row')&&['Enter',' '].includes(event.key)){event.preventDefault();action(()=>openDetail(event.target.dataset.chatId));}});
-$('#select-all').onchange = event => { const rows=visibleRows(); if(event.target.checked){for(const row of rows){if(selected.size>=50)break;selected.add(row.id);}if(rows.length>50)toast('Выбрано до 50 чатов — лимит одной пачки');}else rows.forEach(row=>selected.delete(row.id));renderTable();};
+$('#select-all').onchange = event => toggleFiltered(event.target.checked);
+$('#cleanup-selected').onclick = () => action(async () => cleanupModal(requireSelection(), 'Выбрано'));
 $('#clear-selection').onclick = () => {selected.clear();renderTable();};
 $('#select-remaining').onclick=selectRemaining;
-$('#search').oninput=renderTable;
-$('#kind-filter').onchange=renderTable;
+$('#search').oninput=()=>{searchMessages();resetPage();};
+$('#kind-filter').onchange=resetPage;
 $('#category-filter').onchange=event=>setCategory(event.target.value);
-$('#sort').onchange=renderTable;
+$('#sort').onchange=resetPage;
+$$('[data-sort-column]').forEach(th => { $('.sort-button', th).onclick = () => {
+  const [first, second] = COLUMN_SORTS[th.dataset.sortColumn];
+  $('#sort').value = $('#sort').value === first ? second : first;
+  resetPage();
+}; });
+function toggleFiltered(checked) { const rows = visibleRows(); if (checked) rows.forEach(row => selected.add(row.id)); else rows.forEach(row => selected.delete(row.id)); renderTable(); }
+$('#select-filtered').onclick = () => { const rows = visibleRows(); toggleFiltered(!(rows.length && rows.every(row => selected.has(row.id)))); };
+new IntersectionObserver(entries => {
+  if (!entries.some(entry => entry.isIntersecting) || !state || shown >= visibleRows().length) return;
+  shown += PAGE_SIZE; renderTable();
+}, {rootMargin: '400px 0px'}).observe($('#scroll-sentinel'));
 $('#scan-button').onclick=event=>action(async()=>{if(!state.telegram.authorized)return connect();await api('/api/scan',{method:'POST'});await refresh();},event.currentTarget);
 $('#full-scan-button').onclick=event=>action(async()=>{if(!state.telegram.authorized)return connect();await api('/api/scan',{method:'POST',body:JSON.stringify({full:true})});toast('Полное обновление запущено');await refresh();},event.currentTarget);
 $('#connection').onclick=()=>connect();
 $('#settings-nav').onclick=settingsModal;
 $('#top-settings').onclick=settingsModal;
-$('#llm-nav').onclick=llmModal;
+$('#llm-nav').onclick=()=>action(llmModal);
 $('#folders-nav').onclick=()=>action(foldersModal);
 $('#copy-batch').onclick=()=>action(exportBatch);
 $('#import-batch').onclick=importModal;
-$('#analyze-batch').onclick=llmModal;
+$('#analyze-batch').onclick=()=>action(llmModal);
 $('#csv-button').onclick=()=>{window.location.href='/api/export.csv';};
 document.addEventListener('keydown',event=>{if((event.metaKey||event.ctrlKey)&&event.key==='k'){event.preventDefault();$('#search').focus();}if(event.key==='Escape'&&!$('#modal').open)closeDetail();});
 action(refresh);
@@ -333,3 +468,9 @@ setInterval(async()=>{
     }else if(age>=5000)await refresh();
   }catch{}
 },2000);
+
+// Filters from a deep link, applied once the controls exist.
+if (linkParams.get('kind')) $('#kind-filter').value = linkParams.get('kind');
+if (linkParams.get('sort')) $('#sort').value = linkParams.get('sort');
+if (meta[linkParams.get('category')]) category = linkParams.get('category');
+if (linkParams.get('q')) { $('#search').value = linkParams.get('q'); searchMessages(); }
