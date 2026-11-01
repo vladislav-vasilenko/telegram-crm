@@ -511,6 +511,9 @@ class TelegramService:
                  "inactive": "CRM Неактив", "very_old": "CRM Старые", "dead": "CRM Мёртвые",
                  "spam": "CRM Спам", "short": "CRM Короткие"}
         rows = [classify(**row, settings=self.store.settings()) for row in self.store.all() if not row["chat"].demo]
+        if self.store.settings().language == "en":
+            names = {"important": "CRM Important", "job": "CRM Jobs", "stalled": "CRM Stalled", "suspected_scam": "CRM Review",
+                     "inactive": "CRM Inactive", "very_old": "CRM Old", "dead": "CRM Dead", "spam": "CRM Spam", "short": "CRM Short"}
         return [{"category": key, "title": title, "chat_ids": [row["id"] for row in rows if key in row["categories"]]}
                 for key, title in names.items()]
 

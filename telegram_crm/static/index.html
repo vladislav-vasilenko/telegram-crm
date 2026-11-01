@@ -7,6 +7,8 @@
   <title>Диалоги — Telegram CRM</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/i18n-en.js"></script>
+  <script src="/static/i18n.js"></script>
   <script src="/static/media.js" defer></script>
   <script src="/static/chat-export.js" defer></script>
   <script src="/static/app.js" defer></script>
@@ -20,8 +22,10 @@
     <nav id="triage-navigation" class="triage-navigation" aria-label="Разбор чатов" hidden></nav>
     <div class="sidebar-divider"></div>
     <a class="nav-item telegram-view-link" href="/telegram" aria-label="Вид Telegram"><span data-icon="send"></span><span>Вид Telegram</span></a>
+    <a class="nav-item telegram-view-link" href="/telegram?view=romance" aria-label="Анализ романтики"><span data-icon="heart"></span><span>Анализ романтики</span></a>
     <button class="nav-item" id="llm-nav" aria-label="Анализ LLM"><span data-icon="sparkles"></span><span>Анализ LLM</span><span class="new-label">20 сообщений</span></button>
     <button class="nav-item" id="folders-nav" aria-label="Папки Telegram"><span data-icon="folder"></span><span>Папки Telegram</span></button>
+    <button class="nav-item" id="language-toggle"><span data-icon="info"></span><span id="language-label"></span></button>
     <button class="nav-item" id="settings-nav" aria-label="Настройки"><span data-icon="settings"></span><span>Настройки</span></button>
     <div class="sidebar-bottom"><div class="local-indicator"><span></span>Работает на вашем устройстве</div><p>Переписки остаются локально.<br>LLM получает только выбранные данные.</p><button id="connection" class="connection"><span class="telegram-icon" data-icon="send"></span><span id="connection-text">Подключить Telegram</span><span>↗</span></button></div>
   </aside>

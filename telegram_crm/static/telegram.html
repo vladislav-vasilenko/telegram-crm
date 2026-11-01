@@ -7,6 +7,8 @@
   <title>Диалоги — вид Telegram</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/telegram-view.css">
+  <script src="/static/i18n-en.js"></script>
+  <script src="/static/i18n.js"></script>
   <script src="/static/media.js" defer></script>
   <script src="/static/chat-export.js" defer></script>
   <script src="/static/telegram-view.js" defer></script>
@@ -15,6 +17,8 @@
   <div class="app" id="app">
     <nav class="rail" aria-label="Папки и сортировка">
       <a class="rail-item back" href="/" title="Вернуться в панель"><b>←</b><span>Панель</span></a>
+      <button class="rail-item" id="language-toggle" type="button"><b>A</b><span id="language-label"></span></button>
+      <button class="rail-item" id="romance-open" type="button"><b>♡</b><span>Анализ романтики</span></button>
       <div class="rail-title">ПАПКИ</div>
       <div id="folders"></div>
       <div class="rail-title">ТИП</div>
@@ -78,6 +82,10 @@
         <button type="submit" class="danger">Сделать копию и очистить</button>
       </div>
     </form>
+  </dialog>
+  <dialog id="romance-dialog" aria-labelledby="romance-title">
+    <h2 id="romance-title">Анализ романтики</h2>
+    <div id="romance-body"></div>
   </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
 </body>

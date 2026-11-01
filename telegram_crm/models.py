@@ -27,6 +27,7 @@ class Settings(StrictModel):
     llm_price_input_per_m: float | None = Field(None, ge=0, le=1000)
     llm_price_output_per_m: float | None = Field(None, ge=0, le=1000)
     redact_contacts: bool = True
+    language: Literal["ru", "en"] = "ru"
 
 
 class Annotation(StrictModel):
@@ -105,6 +106,34 @@ class LLMBatchResult(StrictModel):
         if len(ids) != len(set(ids)):
             raise ValueError("Повторяющиеся chat_id в ответе")
         return self
+
+
+class RomanceChatResult(StrictModel):
+    chat_id: str = Field(min_length=1, max_length=80)
+    promise: int = Field(ge=0, le=100)
+    mutual_interest: Literal["high", "medium", "low", "unclear"]
+    ending: Literal["ongoing", "they_stopped", "i_stopped", "mutual_fade", "declined", "moved_off_telegram", "unclear"]
+    recommendation: Literal["write", "wait", "close", "uncertain"]
+    confidence: float = Field(ge=0, le=1)
+    reason: str = Field(min_length=1, max_length=1500)
+    opener: str = Field(max_length=400)
+    evidence_message_ids: list[int] = Field(max_length=10)
+
+
+class RomanceBatchResult(StrictModel):
+    results: list[RomanceChatResult] = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def unique_ids(self):
+        ids = [row.chat_id for row in self.results]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Повторяющиеся chat_id в ответе")
+        return self
+
+
+class RomanceImport(StrictModel):
+    batch_id: str
+    result: RomanceBatchResult
 
 
 class BatchRequest(StrictModel):

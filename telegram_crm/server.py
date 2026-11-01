@@ -19,11 +19,13 @@ from telethon import errors
 from .analysis import CATEGORIES, classify
 from .demo import load_demo
 from .chat_export import full_history, recent_text
+from .i18n import translate
 from .layout import fetch_layout
+from .romance import METADATA_KEY as ROMANCE_KEY, analyze_romance, apply_romance, estimate_romance, export_romance, import_romance
 from .search import history_window, search_history
 from .media import INLINE_TYPES, MediaService, attachment_header, describe, parse_range
 from .llm import PartsFailed, analyze_batch, create_batch, estimate, import_result, provider_for
-from .models import Annotation, AuthApp, CleanupRequest, AuthCode, AuthPassword, AuthStart, BatchRequest, ImportRequest, LLMKey, ScanRequest, Settings
+from .models import RomanceImport, Annotation, AuthApp, CleanupRequest, AuthCode, AuthPassword, AuthStart, BatchRequest, ImportRequest, LLMKey, ScanRequest, Settings
 from .store import Store, utcnow
 from .telegram import TelegramService
 from .triage import apply_triage, triage_summary
@@ -53,15 +55,16 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
 
     def analyzed_rows():
         settings = store.settings()
-        saved = store.metadata("triage", {})
-        return sorted([apply_triage(classify(**row, settings=settings), row["chat"], row["annotation"], saved) for row in store.all()],
+        saved, romance = store.metadata("triage", {}), store.metadata(ROMANCE_KEY, {})
+        return sorted([apply_romance(apply_triage(classify(**row, settings=settings), row["chat"], row["annotation"], saved), row["chat"], row["annotation"], romance)
+                       for row in store.all()],
                       key=lambda r: (-r["priority_score"], r["title"].lower()))
 
     def remaining(rows=None):
         return [row["id"] for row in (rows if rows is not None else analyzed_rows()) if "important" not in row["categories"]
                 and (not row["llm"] or row["llm_stale"]) and row["loaded_messages"] and not row["demo"]]
 
-    def start_llm(request):
+    def start_llm(request, runner=analyze_batch):
         nonlocal llm_task
         if jobs["llm"]["running"]:
             raise ValueError("Анализ LLM уже выполняется")
@@ -76,7 +79,7 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
 
         async def run():
             try:
-                await analyze_batch(store, request, key, store.settings().llm_model,
+                await runner(store, request, key, store.settings().llm_model,
                                     lambda done, total: jobs["llm"].update(done=done, total=total))
             except asyncio.CancelledError:
                 raise
@@ -287,13 +290,15 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
     async def export_chat(chat_id: str, request: Request, scope: Literal["recent", "full"] = "recent"):
         chat = media_chat(chat_id, request)
         if scope == "recent":
-            name = f"{chat.title} - последние 100.txt"
-            return Response(recent_text(chat), media_type="text/plain; charset=utf-8",
+            language = store.settings().language
+            name = chat.title + translate(" - последние 100.txt", language)
+            return Response(recent_text(chat, language=language), media_type="text/plain; charset=utf-8",
                             headers={"Content-Disposition": attachment_header(name, False)})
         client, peer = await export_peer(chat)
         total = (await client.get_messages(peer, limit=0)).total
-        return StreamingResponse(full_history(client, peer, chat, total), media_type="text/plain; charset=utf-8",
-                                 headers={"Content-Disposition": attachment_header(f"{chat.title} - вся история.txt", False)})
+        language = store.settings().language
+        return StreamingResponse(full_history(client, peer, chat, total, language), media_type="text/plain; charset=utf-8",
+                                 headers={"Content-Disposition": attachment_header(chat.title + translate(" - вся история.txt", language), False)})
 
     @app.get("/api/chats/{chat_id}/media")
     async def media_info(chat_id: str, request: Request, ids: str = ""):
@@ -342,7 +347,8 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
         row = store.get(chat_id)
         if not row:
             raise HTTPException(404, "Чат не найден")
-        return {**apply_triage(classify(**row, settings=store.settings()), row["chat"], row["annotation"], store.metadata("triage", {})),
+        return {**apply_romance(apply_triage(classify(**row, settings=store.settings()), row["chat"], row["annotation"], store.metadata("triage", {})),
+                                row["chat"], row["annotation"], store.metadata(ROMANCE_KEY, {})),
                 "messages": [m.model_dump(mode="json") for m in sorted(row["chat"].messages, key=lambda m: (m.date, m.id))]}
 
     @app.put("/api/chats/{chat_id}/annotation")
@@ -459,6 +465,23 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
         start_llm(request)
         return {"started": True}
 
+    @app.post("/api/romance/estimate")
+    async def romance_estimate(request: BatchRequest):
+        return estimate_romance(store, request)
+
+    @app.post("/api/romance/export")
+    async def romance_export(request: BatchRequest):
+        return export_romance(store, request)
+
+    @app.post("/api/romance/import")
+    async def romance_import(request: RomanceImport):
+        return {"imported": import_romance(store, request.batch_id, request.result)}
+
+    @app.post("/api/romance/analyze", status_code=202)
+    async def romance_analyze(request: BatchRequest):
+        start_llm(request, analyze_romance)
+        return {"started": True}
+
     @app.get("/api/folders/plan")
     async def folder_plan():
         return {"folders": telegram.folder_plan()}
@@ -471,13 +494,14 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
     async def export_csv():
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["Чат", "Категории", "Последнее сообщение (UTC)", "Дней без общения", "Сообщений за 30 дней (в выборке)", "Причины"])
+        language = store.settings().language
+        writer.writerow([translate(name, language) for name in ("Чат", "Категории", "Последнее сообщение (UTC)", "Дней без общения", "Сообщений за 30 дней (в выборке)", "Причины")])
         def cell(value):
             text = str(value or "")
             return "'" + text if text.lstrip().startswith(("=", "+", "-", "@", "\t", "\r")) else text
         for row in analyzed_rows():
-            writer.writerow([cell(row["title"]), "; ".join(CATEGORIES[c] for c in row["categories"]),
-                             row["last_message_at"], row["idle_days"], row["recent_messages"], cell("; ".join(row["reasons"]))])
+            writer.writerow([cell(row["title"]), "; ".join(translate(CATEGORIES[c], language) for c in row["categories"]),
+                             row["last_message_at"], row["idle_days"], row["recent_messages"], cell("; ".join(translate(reason, language) for reason in row["reasons"]))])
         return Response("\ufeff" + output.getvalue(), media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": 'attachment; filename="telegram-chats.csv"'})
 

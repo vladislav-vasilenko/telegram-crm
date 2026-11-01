@@ -18,17 +18,17 @@ def is_anthropic_model(model: str) -> bool:
 
 @asynccontextmanager
 async def anthropic_backend(api_key: str, model: str):
-    """Yields call(system, user, max_tokens) -> LLMBatchResult | None (None = no usable answer)."""
+    """Yields call(system, user, max_tokens, schema) -> parsed schema | None (None = no usable answer)."""
     from anthropic import AsyncAnthropic
 
     async with AsyncAnthropic(api_key=api_key, timeout=300, max_retries=2) as client:
-        async def call(system: str, user: str, max_tokens: int):
+        async def call(system: str, user: str, max_tokens: int, schema=LLMBatchResult):
             response = await client.messages.parse(
                 model=model,
                 max_tokens=max(MIN_MAX_TOKENS, max_tokens),
                 system=system,
                 messages=[{"role": "user", "content": user}],
-                output_format=LLMBatchResult,
+                output_format=schema,
             )
             # A refusal (Claude Haiku 5.5 has no server-side fallback) or a cut-off answer is not a
             # complete result for this part; the caller discards the part as a whole.

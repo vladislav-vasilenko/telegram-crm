@@ -45,6 +45,8 @@ const selected = new Set();
 let cleanupIds = [], cleanupSingle = false;
 // Whole-history search: results replace the list until the query changes or the search is closed.
 let deep = null, deepLoading = false, currentMatch = null;
+// Romance review: results replace the list until another folder or search is chosen.
+let romanceMode = params.get('view') === 'romance', romanceFilter = 'all', romanceWatch = null;
 // The open chat's messages, so older and newer pages can be added around them.
 let reading = {messages: [], target: null, canOlder: false, canNewer: false};
 
@@ -63,14 +65,14 @@ const plural = (n, one, few, many) => { const a = n % 100, b = n % 10; return a 
 const chatsLabel = n => `${n} ${plural(n, 'чат', 'чата', 'чатов')}`;
 const zone = {timeZone: 'Europe/Moscow'};
 const dayKey = value => new Intl.DateTimeFormat('en-CA', zone).format(new Date(value));
-const timeOnly = value => new Intl.DateTimeFormat('ru-RU', {...zone, hour: '2-digit', minute: '2-digit'}).format(new Date(value));
-const dayLabel = value => new Intl.DateTimeFormat('ru-RU', {...zone, day: 'numeric', month: 'long', year: 'numeric'}).format(new Date(value));
+const timeOnly = value => new Intl.DateTimeFormat(I18N.locale, {...zone, hour: '2-digit', minute: '2-digit'}).format(new Date(value));
+const dayLabel = value => new Intl.DateTimeFormat(I18N.locale, {...zone, day: 'numeric', month: 'long', year: 'numeric'}).format(new Date(value));
 function listTime(value) {
   if (!value) return '';
   const date = new Date(value);
   if (dayKey(value) === dayKey(Date.now())) return timeOnly(value);
   const sameYear = dayKey(value).slice(0, 4) === dayKey(Date.now()).slice(0, 4);
-  return new Intl.DateTimeFormat('ru-RU', {...zone, day: 'numeric', month: 'short', ...(sameYear ? {} : {year: '2-digit'})}).format(date);
+  return new Intl.DateTimeFormat(I18N.locale, {...zone, day: 'numeric', month: 'short', ...(sameYear ? {} : {year: '2-digit'})}).format(date);
 }
 const initials = title => title.split(/\s+/).filter(Boolean).slice(0, 2).map(word => Array.from(word)[0]).join('').toUpperCase() || '?';
 const avatarClass = id => `a${[...String(id)].reduce((sum, c) => sum + c.charCodeAt(0), 0) % 7}`;
@@ -155,7 +157,7 @@ function renderTools() {
 function rowMarkup(row) {
   const color = colorOf(row), query = $('#search').value.trim().toLocaleLowerCase('ru');
   const hit = query ? searchHit(row, query) : '';
-  const preview = hit || `${row.last_outgoing ? 'Вы: ' : ''}${row.last_message || (row.loaded_messages ? 'Вложение' : 'Нет сообщений')}`;
+  const preview = hit || `${row.last_outgoing ? I18N.t('Вы: ') : ''}${row.last_message || I18N.t(row.loaded_messages ? 'Вложение' : 'Нет сообщений')}`;
   return `<li class="chat c-${color} ${row.id === currentId ? 'current' : ''}" data-id="${escapeHTML(row.id)}" tabindex="0" aria-label="${escapeHTML(row.title)}">
     <input class="chat-check" type="checkbox" data-select="${escapeHTML(row.id)}" aria-label="Выбрать ${escapeHTML(row.title)}" ${selected.has(row.id) ? 'checked' : ''}>
     <div class="avatar ${avatarClass(row.id)}">${escapeHTML(initials(row.title))}</div>
@@ -172,7 +174,7 @@ function deepResultMarkup(result) {
   const more = result.total - result.matches.length;
   return `<li class="found"><button class="found-head" data-open-chat="${escapeHTML(row.id)}"><span class="avatar ${avatarClass(row.id)}">${escapeHTML(initials(row.title))}</span><span class="found-title">${escapeHTML(row.title)}</span>${COLORS[color] ? `<span class="tag c-${color}">${COLORS[color].tag}</span>` : ''}<span class="found-count">${result.total}</span></button>
     ${complete ? `<div class="found-note">${complete}</div>` : ''}
-    ${result.matches.map(match => `<button class="found-message ${currentMatch === `${row.id}:${match.id}` ? 'current' : ''}" data-open-chat="${escapeHTML(row.id)}" data-message="${Number(match.id)}"><time>${dayLabel(match.date)}, ${timeOnly(match.date)} · ${match.outgoing ? 'Вы' : 'Собеседник'}</time>${highlight(escapeHTML(match.snippet))}</button>`).join('')}
+    ${result.matches.map(match => `<button class="found-message ${currentMatch === `${row.id}:${match.id}` ? 'current' : ''}" data-open-chat="${escapeHTML(row.id)}" data-message="${Number(match.id)}"><time>${dayLabel(match.date)}, ${timeOnly(match.date)} · ${I18N.t(match.outgoing ? 'Вы' : 'Собеседник')}</time>${highlight(escapeHTML(match.snippet))}</button>`).join('')}
     ${more > 0 ? `<div class="found-more">и ещё ${more} в этом чате</div>` : ''}</li>`;
 }
 function highlight(html) {
@@ -207,9 +209,104 @@ async function runDeepSearch() {
   if (deep) $('#chats').scrollTop = 0;
 }
 function closeDeep() { deep = null; currentMatch = null; renderDeepControls(); resetList(); }
+const REC_LABEL = {write: 'Написать', wait: 'Подождать', close: 'Закрыть тему', uncertain: 'Неясно'};
+const ENDING_LABEL = {ongoing: 'Ещё общаетесь', they_stopped: 'Перестал отвечать собеседник', i_stopped: 'Перестали отвечать вы', mutual_fade: 'Затихло с обеих сторон', declined: 'Собеседник отказал', moved_off_telegram: 'Общение ушло из Telegram', unclear: 'Причина неясна'};
+const INTEREST_LABEL = {high: 'Взаимный интерес высокий', medium: 'Взаимный интерес средний', low: 'Взаимный интерес низкий', unclear: 'Взаимный интерес неясен'};
+const REC_ORDER = {write: 0, wait: 1, uncertain: 2, close: 3};
+const romanceRows = () => state.chats.filter(row => row.kind === 'user' && (row.romance_candidate || row.romance));
+const romanceOrder = (a, b) => REC_ORDER[a.romance.result.recommendation] - REC_ORDER[b.romance.result.recommendation] || b.romance.result.promise - a.romance.result.promise;
+const needsRomance = () => romanceRows().filter(row => !row.romance || row.romance.stale).sort((a, b) => b.loaded_messages - a.loaded_messages);
+function romanceRowMarkup(row) {
+  const r = row.romance?.result;
+  const meta = r ? [ENDING_LABEL[r.ending], `уверенность ${Math.round(r.confidence * 100)}%`, row.romance.stale ? 'устарел' : ''].filter(Boolean).join(' · ') : (row.idle_days === null ? '' : `${row.idle_days} дн. без общения`);
+  return `<li><button class="romance-row ${row.id === currentId ? 'current' : ''}" data-open-chat="${escapeHTML(row.id)}"><div class="romance-top"><span class="avatar ${avatarClass(row.id)}">${escapeHTML(initials(row.title))}</span><span class="chat-title">${escapeHTML(row.title)}</span>${r ? `<span class="rec rec-${r.recommendation}">${REC_LABEL[r.recommendation]}</span><span class="romance-score" title="Перспективность, 0–100">${Number(r.promise)}</span>` : ''}</div><div class="romance-meta">${escapeHTML(meta)}</div>${r ? `<div class="romance-reason romance-text">${escapeHTML(r.reason)}</div>` : ''}</button></li>`;
+}
+function renderRomance() {
+  const list = $('#chats');
+  list.classList.remove('colored');
+  const rows = romanceRows(), done = rows.filter(row => row.romance).sort(romanceOrder), todo = needsRomance();
+  const count = key => (key === 'none' ? rows.filter(row => !row.romance).length : done.filter(row => row.romance.result.recommendation === key).length);
+  const filters = [['all', 'Все', rows.length], ...Object.keys(REC_LABEL).map(key => [key, REC_LABEL[key], count(key)]), ['none', 'Без анализа', count('none')]];
+  const shownRows = romanceFilter === 'all' ? [...done, ...rows.filter(row => !row.romance)] : romanceFilter === 'none' ? rows.filter(row => !row.romance) : done.filter(row => row.romance.result.recommendation === romanceFilter);
+  const closing = done.filter(row => row.romance.result.recommendation === 'close');
+  $('#list-count').textContent = `Анализ романтики: ${chatsLabel(rows.length)}`;
+  list.innerHTML = `<li class="romance-head"><div>Советы LLM по фрагменту переписки. Ничего не отправляется.</div>
+    <div class="romance-actions"><button class="primary" data-romance="sample" ${todo.length ? '' : 'disabled'}>Проверить на ${Math.min(5, todo.length)} чатах</button><button data-romance="rest" ${todo.length ? '' : 'disabled'}>Анализировать все (${todo.length})</button><button data-romance="import">Импорт ответа</button>${closing.length ? `<button data-romance="select-close">Выбрать «Закрыть тему» (${closing.length})</button>` : ''}</div>
+    <div class="romance-filters">${filters.map(([key, label, total]) => `<button data-romance-filter="${key}" class="${romanceFilter === key ? 'active' : ''}">${label} ${total}</button>`).join('')}</div></li>
+    ${shownRows.length ? shownRows.map(romanceRowMarkup).join('') : '<li class="empty">Здесь пока пусто</li>'}`;
+}
+function romanceCard(row) {
+  if (!row.romance) return '';
+  const r = row.romance.result;
+  const note = {declined: 'Вы получили отказ, поэтому совет написать снят.', unanswered: 'Вы уже написали 3 раза подряд без ответа, поэтому совет написать заменён на «Подождать».'}[row.romance.held_back];
+  return `<div class="romance-card"><div class="romance-top"><span class="rec rec-${r.recommendation}">${REC_LABEL[r.recommendation]}</span><strong>Перспективность ${Number(r.promise)} / 100</strong></div>
+    <p>${ENDING_LABEL[r.ending]}. ${INTEREST_LABEL[r.mutual_interest]}.</p>
+    ${note ? `<p class="romance-note">${note}</p>` : ''}${row.romance.stale ? '<p class="romance-note">Есть новые сообщения, анализ устарел.</p>' : ''}
+    <p class="romance-text">${escapeHTML(r.reason)}</p>
+    ${r.opener ? `<div class="opener romance-text">${escapeHTML(r.opener)}</div><button data-romance-copy>Скопировать идею</button>` : ''}
+    ${r.evidence_message_ids.length ? `<p>Основания: ${r.evidence_message_ids.map(id => `<button data-open-chat="${escapeHTML(row.id)}" data-message="${Number(id)}">#${Number(id)}</button>`).join('')}</p>` : ''}
+    <p class="hint">Оценка LLM по фрагменту: встречи и звонки вне Telegram она не видит. Уверенность ${Math.round(r.confidence * 100)}%. ${escapeHTML(row.romance.source)}</p></div>`;
+}
+function romanceRequest(ids) { return {chat_ids: ids, redact_contacts: state.settings.redact_contacts}; }
+async function openRomanceRun(ids) {
+  const dialog = $('#romance-dialog'), body = $('#romance-body');
+  let estimate;
+  try { estimate = await api('/api/romance/estimate', {method: 'POST', body: JSON.stringify(romanceRequest(ids))}); }
+  catch (error) { return toast(error.message, true); }
+  const provider = estimate.provider === 'anthropic' ? 'Anthropic' : 'OpenAI', keyReady = state.llm_keys[estimate.provider];
+  body.innerHTML = `<p class="warning">Текст этих сообщений уйдёт выбранному провайдеру LLM. Это личная переписка другого человека. ${state.settings.redact_contacts ? 'Имена в заголовках и контакты скрываются, но остальной текст уходит как есть.' : 'Скрытие имён и контактов выключено.'}</p>
+    <table><tr><td>Чатов</td><td>${estimate.chats}</td></tr><tr><td>Сообщений</td><td>${estimate.messages}</td></tr><tr><td>Модель</td><td>${escapeHTML(estimate.model)}</td></tr><tr><td>Токенов на входе / выходе</td><td>${estimate.input_tokens} / ${estimate.output_tokens}</td></tr>${estimate.cost_usd !== null ? `<tr><td>Оценка</td><td>$${estimate.cost_usd}</td></tr>` : ''}</table>
+    <p class="hint">Сообщения передаются только после вашего нажатия. Если ключа нет, скопируйте промпт в свою LLM и вставьте её JSON-ответ через «Импорт ответа».</p>
+    <div class="dialog-actions"><button class="action" data-romance-action="cancel">Отмена</button>${estimate.copy_paste_ok ? '<button class="action" data-romance-action="copy">Скопировать промпт</button>' : ''}${keyReady ? `<button class="action primary" data-romance-action="run">Отправить в ${provider}</button>` : ''}</div>`;
+  body.dataset.ids = JSON.stringify(ids);
+  dialog.showModal();
+}
+function openRomanceImport(batchId = '') {
+  $('#romance-body').innerHTML = `<p>Вставьте JSON-ответ вашей LLM. Он проверяется по ID чатов и сообщений.</p><label>Идентификатор пачки<input id="romance-batch" value="${escapeHTML(batchId)}"></label><textarea id="romance-json" placeholder='{"results": [...]}'></textarea><div class="dialog-actions"><button class="action" data-romance-action="cancel">Отмена</button><button class="action primary" data-romance-action="import">Проверить и импортировать</button></div>`;
+  if (!$('#romance-dialog').open) $('#romance-dialog').showModal();
+}
+async function romanceAction(kind) {
+  const dialog = $('#romance-dialog'), body = $('#romance-body');
+  if (kind === 'cancel') return dialog.close();
+  try {
+    if (kind === 'run') {
+      await api('/api/romance/analyze', {method: 'POST', body: JSON.stringify(romanceRequest(JSON.parse(body.dataset.ids)))});
+      dialog.close(); toast('Анализ LLM запущен'); watchRomance();
+    } else if (kind === 'copy') {
+      const exported = await api('/api/romance/export', {method: 'POST', body: JSON.stringify(romanceRequest(JSON.parse(body.dataset.ids)))});
+      body.innerHTML = `<p>Вставьте в выбранную LLM. Затем скопируйте её JSON-ответ и импортируйте здесь.</p><textarea id="romance-prompt" readonly></textarea><div class="dialog-actions"><button class="action" data-romance-action="cancel">Закрыть</button><button class="action primary" data-romance-action="to-import">Импорт ответа</button></div>`;
+      $('#romance-prompt').value = exported.prompt;
+      body.dataset.batch = exported.batch_id;
+      try { localStorage.setItem('tg-crm-romance-batch', exported.batch_id); } catch { /* the ID stays on screen */ }
+      try { await navigator.clipboard.writeText(exported.prompt); toast('Пачка скопирована'); } catch { $('#romance-prompt').select(); toast('Выделите и скопируйте текст вручную'); }
+    } else if (kind === 'to-import') {
+      openRomanceImport(body.dataset.batch);
+    } else if (kind === 'import') {
+      const raw = $('#romance-json').value.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+      let result; try { result = JSON.parse(raw); } catch { throw Error('Не удалось прочитать JSON. Вставьте только объект {"results": [...]}'); }
+      const answer = await api('/api/romance/import', {method: 'POST', body: JSON.stringify({batch_id: $('#romance-batch').value.trim(), result})});
+      dialog.close(); toast(`Импортировано результатов: ${answer.imported}`); await load();
+    }
+  } catch (error) { toast(error.message, true); }
+}
+function watchRomance() {
+  clearTimeout(romanceWatch);
+  romanceWatch = setTimeout(async () => {
+    let status;
+    try { status = await api('/api/status'); } catch { return watchRomance(); }
+    const job = status.llm_job, node = $('#status');
+    node.hidden = !(job.running || job.error);
+    node.classList.toggle('error', Boolean(job.error));
+    node.textContent = job.error || `LLM: проанализировано ${job.done} из ${job.total}`;
+    if (job.running) return watchRomance();
+    await load();
+    if (job.error) { node.hidden = false; node.classList.add('error'); node.textContent = job.error; }
+  }, 2000);
+}
 function renderList() {
   renderDeepControls();
   if (deep) return renderDeep();
+  if (romanceMode) return renderRomance();
   const rows = visibleRows();
   const list = $('#chats');
   list.classList.toggle('colored', colorMode);
@@ -230,13 +327,13 @@ function renderHead(row) {
 function renderAbout(row) {
   $('#about').hidden = false;
   $('#about-body').innerHTML = `<div class="stats"><div><strong>${row.outgoing_30d}${row.frequency_is_lower_bound ? '+' : ''}</strong>ваших за 30 дней</div><div><strong>${row.recent_messages}${row.frequency_is_lower_bound ? '+' : ''}</strong>всего за 30 дней</div><div><strong>${row.idle_days ?? '—'}</strong>дней тишины</div><div><strong>${row.loaded_messages}</strong>загружено</div></div>
-    <ul>${(row.reasons.length ? row.reasons : ['Специальных сигналов нет']).map(reason => `<li>${escapeHTML(reason)}</li>`).join('')}</ul>${chatExport.markup(row.loaded_messages, row.demo)}`;
+    ${romanceCard(row)}<ul>${(row.reasons.length ? row.reasons : ['Специальных сигналов нет']).map(reason => `<li>${escapeHTML(reason)}</li>`).join('')}</ul>${chatExport.markup(row.loaded_messages, row.demo)}`;
   chatExport.bind($('#about-body'), row.id, api, toast);
 }
 function messageMarkup(message) {
   const media = chatMedia.fetchable.has(message.media) ? `<div class="media-slot" data-media-id="${Number(message.id)}"></div>` : '';
   const body = message.text ? highlight(linkify(escapeHTML(message.text))) : `<span class="media-label">${escapeHTML(chatMedia.label(message.media))}</span>`;
-  return `<div class="msg ${message.outgoing ? 'out' : ''} ${message.id === reading.target ? 'target' : ''}" data-message-id="${Number(message.id)}">${message.forwarded ? '<div class="msg-forward">Переслано</div>' : ''}${media}${body}<span class="msg-time">${timeOnly(message.date)}</span></div>`;
+  return `<div class="msg ${message.outgoing ? 'out' : ''} ${message.id === reading.target ? 'target' : ''}" data-message-id="${Number(message.id)}">${message.forwarded ? `<div class="msg-forward">${I18N.t('Переслано')}</div>` : ''}${media}${body}<span class="msg-time">${timeOnly(message.date)}</span></div>`;
 }
 function renderMessages(note = '') {
   let day = '', html = reading.canOlder ? '<button class="more-history" data-history="older">Загрузить раньше</button>' : note;
@@ -360,6 +457,7 @@ function watchStatus() {
 }
 async function load() {
   state = await api('/api/state');
+  I18N.sync(state.settings);
   applyLayout(layout.dialogs.length ? layout : await api('/api/telegram/layout?cached=true'));
   const ids = new Set(state.chats.map(row => row.id));
   [...selected].filter(id => !ids.has(id)).forEach(id => selected.delete(id));
@@ -399,14 +497,29 @@ function searchMessages() {
 
 document.addEventListener('click', event => {
   const target = event.target;
+  if (target.closest('#romance-open')) { romanceMode = true; deep = null; return resetList(); }
+  const romanceFilterButton = target.closest('[data-romance-filter]');
+  if (romanceFilterButton) { romanceFilter = romanceFilterButton.dataset.romanceFilter; return renderList(); }
+  const romanceButton = target.closest('[data-romance]');
+  if (romanceButton) {
+    const kind = romanceButton.dataset.romance, todo = needsRomance().map(row => row.id);
+    if (kind === 'sample') return openRomanceRun(todo.slice(0, 5));
+    if (kind === 'rest') return openRomanceRun(todo);
+    if (kind === 'import') { let batch = ''; try { batch = localStorage.getItem('tg-crm-romance-batch') || ''; } catch { /* typed by hand */ } return openRomanceImport(batch); }
+    if (kind === 'select-close') { romanceRows().filter(row => row.romance?.result.recommendation === 'close').forEach(row => selected.add(row.id)); return renderTools(); }
+  }
+  const romanceDialogButton = target.closest('[data-romance-action]');
+  if (romanceDialogButton) return romanceAction(romanceDialogButton.dataset.romanceAction);
+  const copyOpener = target.closest('[data-romance-copy]');
+  if (copyOpener) { navigator.clipboard.writeText($('.romance-card .opener').textContent).then(() => toast('Ответ скопирован'), () => toast('Выделите и скопируйте текст вручную', true)); return; }
   const moreButton = target.closest('[data-history]');
   if (moreButton) return loadMoreHistory(moreButton.dataset.history, moreButton);
   const opener = target.closest('[data-open-chat]');
   if (opener) return opener.dataset.message ? openChatAt(opener.dataset.openChat, Number(opener.dataset.message)) : openChat(opener.dataset.openChat);
   const folderButton = target.closest('[data-folder]');
-  if (folderButton) { folder = folderButton.dataset.folder; return resetList(); }
+  if (folderButton) { folder = folderButton.dataset.folder; romanceMode = false; return resetList(); }
   const kindButton = target.closest('[data-kind]');
-  if (kindButton) { kind = kindButton.dataset.kind; return resetList(); }
+  if (kindButton) { kind = kindButton.dataset.kind; romanceMode = false; return resetList(); }
   const sortButton = target.closest('[data-sort]');
   if (sortButton) {
     const key = sortButton.dataset.sort;
@@ -448,7 +561,7 @@ $('#chats').addEventListener('change', event => {
 $('#chats').addEventListener('keydown', event => {
   if (event.target.matches('.chat') && event.key === 'Enter') { event.preventDefault(); openChat(event.target.dataset.id); }
 });
-$('#search').addEventListener('input', () => { deep = null; currentMatch = null; searchMessages(); resetList(); });
+$('#search').addEventListener('input', () => { deep = null; romanceMode = false; currentMatch = null; searchMessages(); resetList(); });
 $('#search').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); runDeepSearch(); } });
 $('#deep-search-run').addEventListener('click', () => (deep ? closeDeep() : runDeepSearch()));
 $('#deep-search-private').addEventListener('change', () => { if (deep) { deep = null; runDeepSearch(); } });
@@ -458,6 +571,8 @@ $('#clear-selection').addEventListener('click', () => { selected.clear(); onlySe
 $('#cleanup').addEventListener('click', () => openCleanup());
 $('#cleanup-form').addEventListener('submit', submitCleanup);
 $('#cleanup-cancel').addEventListener('click', () => $('#cleanup-dialog').close());
+$('#language-label').textContent = I18N.toggleLabel;
+$('#language-toggle').addEventListener('click', () => I18N.toggle(api, state.settings).catch(error => toast(error.message, true)));
 $('#tools-close').addEventListener('click', () => $('.tools').classList.toggle('closed'));
 new IntersectionObserver(entries => {
   if (!entries[0].isIntersecting || !state) return;
