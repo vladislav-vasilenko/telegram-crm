@@ -43,6 +43,10 @@ let hits = {query: '', hits: {}}, searchTimer = null, searchSeq = 0, toastTimer 
 let selectOnLoad = params.get('select') === 'all', layoutLoading = false;
 const selected = new Set();
 let cleanupIds = [], cleanupSingle = false;
+// Whole-history search: results replace the list until the query changes or the search is closed.
+let deep = null, deepLoading = false, currentMatch = null;
+// The open chat's messages, so older and newer pages can be added around them.
+let reading = {messages: [], target: null, canOlder: false, canNewer: false};
 
 function toast(message, error = false) {
   clearTimeout(toastTimer);
@@ -160,7 +164,52 @@ function rowMarkup(row) {
       <div class="chat-bottom"><span class="chat-preview">${escapeHTML(preview)}</span>${COLORS[color] ? `<span class="tag c-${color}">${COLORS[color].tag}</span>` : ''}${row.unread_count ? `<span class="unread">${row.unread_count > 999 ? '999+' : row.unread_count}</span>` : ''}</div>
     </div></li>`;
 }
+function deepResultMarkup(result) {
+  const row = state.chats.find(item => item.id === result.chat_id);
+  if (!row) return '';
+  const color = colorOf(row), words = deep.stems.length;
+  const complete = words > 1 && result.best === words ? 'все слова в одном сообщении' : words > 1 && result.covered === words ? 'все слова в этом чате' : '';
+  const more = result.total - result.matches.length;
+  return `<li class="found"><button class="found-head" data-open-chat="${escapeHTML(row.id)}"><span class="avatar ${avatarClass(row.id)}">${escapeHTML(initials(row.title))}</span><span class="found-title">${escapeHTML(row.title)}</span>${COLORS[color] ? `<span class="tag c-${color}">${COLORS[color].tag}</span>` : ''}<span class="found-count">${result.total}</span></button>
+    ${complete ? `<div class="found-note">${complete}</div>` : ''}
+    ${result.matches.map(match => `<button class="found-message ${currentMatch === `${row.id}:${match.id}` ? 'current' : ''}" data-open-chat="${escapeHTML(row.id)}" data-message="${Number(match.id)}"><time>${dayLabel(match.date)}, ${timeOnly(match.date)} · ${match.outgoing ? 'Вы' : 'Собеседник'}</time>${highlight(escapeHTML(match.snippet))}</button>`).join('')}
+    ${more > 0 ? `<div class="found-more">и ещё ${more} в этом чате</div>` : ''}</li>`;
+}
+function highlight(html) {
+  if (!deep?.stems?.length) return html;
+  const words = deep.stems.map(item => item.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/е/g, '[её]')).join('|');
+  const pattern = new RegExp(`(<[^>]+>|&[a-z#0-9]+;)|(?<![\\p{L}\\p{N}])(?:${words})[\\p{L}\\p{N}]*`, 'giu');
+  return html.replace(pattern, (match, skip) => (skip ? match : `<mark>${match}</mark>`));
+}
+function renderDeep() {
+  const list = $('#chats');
+  list.classList.toggle('colored', colorMode);
+  const count = deep.results.length;
+  $('#list-count').textContent = `Вся история Telegram: ${chatsLabel(count)}${deep.partial ? ' · Telegram ограничил запросы, список может быть неполным' : ''}${deep.not_in_crm ? ` · вне списка чатов: ${deep.not_in_crm}` : ''}`;
+  list.innerHTML = count ? deep.results.map(deepResultMarkup).join('') : '<li class="empty">В истории Telegram ничего не нашлось. Попробуйте другое слово или форму слова.</li>';
+}
+function renderDeepControls() {
+  const query = $('#search').value.trim();
+  $('#deep-search').hidden = query.length < 2;
+  const button = $('#deep-search-run');
+  button.disabled = deepLoading;
+  button.textContent = deepLoading ? 'Ищу в Telegram…' : deep ? 'Показать обычный список' : 'Искать по всей истории';
+}
+async function runDeepSearch() {
+  const query = $('#search').value.trim();
+  if (query.length < 2 || deepLoading) return;
+  deepLoading = true; renderDeepControls();
+  try {
+    const answer = await api(`/api/telegram/search?q=${encodeURIComponent(query)}&private_only=${$('#deep-search-private').checked}`);
+    if ($('#search').value.trim() === query) { deep = answer; currentMatch = null; }
+  } catch (error) { toast(error.message, true); }
+  deepLoading = false; renderDeepControls(); renderList();
+  if (deep) $('#chats').scrollTop = 0;
+}
+function closeDeep() { deep = null; currentMatch = null; renderDeepControls(); resetList(); }
 function renderList() {
+  renderDeepControls();
+  if (deep) return renderDeep();
   const rows = visibleRows();
   const list = $('#chats');
   list.classList.toggle('colored', colorMode);
@@ -186,11 +235,56 @@ function renderAbout(row) {
 }
 function messageMarkup(message) {
   const media = chatMedia.fetchable.has(message.media) ? `<div class="media-slot" data-media-id="${Number(message.id)}"></div>` : '';
-  const body = message.text ? linkify(escapeHTML(message.text)) : `<span class="media-label">[${escapeHTML(message.media || 'Вложение')}]</span>`;
-  return `<div class="msg ${message.outgoing ? 'out' : ''}">${message.forwarded ? '<div class="msg-forward">Переслано</div>' : ''}${media}${body}<span class="msg-time">${timeOnly(message.date)}</span></div>`;
+  const body = message.text ? highlight(linkify(escapeHTML(message.text))) : `<span class="media-label">${escapeHTML(chatMedia.label(message.media))}</span>`;
+  return `<div class="msg ${message.outgoing ? 'out' : ''} ${message.id === reading.target ? 'target' : ''}" data-message-id="${Number(message.id)}">${message.forwarded ? '<div class="msg-forward">Переслано</div>' : ''}${media}${body}<span class="msg-time">${timeOnly(message.date)}</span></div>`;
+}
+function renderMessages(note = '') {
+  let day = '', html = reading.canOlder ? '<button class="more-history" data-history="older">Загрузить раньше</button>' : note;
+  for (const message of reading.messages) {
+    const key = dayKey(message.date);
+    if (key !== day) { day = key; html += `<div class="day">${dayLabel(message.date)}</div>`; }
+    html += messageMarkup(message);
+  }
+  if (reading.canNewer) html += '<button class="more-history" data-history="newer">Загрузить позже</button>';
+  $('#messages').innerHTML = html || '<div class="history-note">Нет загруженных сообщений</div>';
+  const id = currentId;
+  chatMedia.fill({root: $('#messages'), chatId: id, request: api, isCurrent: () => currentId === id});
+}
+async function loadMoreHistory(direction, button) {
+  const id = currentId, box = $('#messages');
+  button.disabled = true; button.textContent = 'Загружаю из Telegram…';
+  const edge = direction === 'older' ? `before=${reading.messages[0]?.id ?? 0}` : `after=${reading.messages.at(-1)?.id ?? 0}`;
+  try {
+    const {messages} = await api(`/api/chats/${encodeURIComponent(id)}/history?${edge}`);
+    if (currentId !== id) return;
+    const known = new Set(reading.messages.map(message => message.id));
+    const fresh = messages.filter(message => !known.has(message.id));
+    if (direction === 'older') { reading.messages = [...fresh, ...reading.messages]; reading.canOlder = fresh.length > 0; }
+    else { reading.messages = [...reading.messages, ...fresh]; reading.canNewer = fresh.length > 0; }
+    const fromBottom = box.scrollHeight - box.scrollTop, top = box.scrollTop;
+    renderMessages();
+    box.scrollTop = direction === 'older' ? box.scrollHeight - fromBottom : top;
+  } catch (error) { button.disabled = false; button.textContent = 'Не удалось. Повторить'; toast(error.message, true); }
+}
+// Opens a message that may be far older than the loaded ones, with its surroundings from Telegram.
+async function openChatAt(id, messageId) {
+  currentMatch = `${id}:${messageId}`;
+  document.querySelectorAll('.found-message.current').forEach(node => node.classList.remove('current'));
+  document.querySelector(`.found-message[data-open-chat="${CSS.escape(id)}"][data-message="${messageId}"]`)?.classList.add('current');
+  currentId = id;
+  $('#placeholder').hidden = true; $('#chat-view').hidden = false; $('#app').classList.add('reading');
+  $('#messages').innerHTML = '<div class="history-note">Загрузка из Telegram…</div>';
+  try {
+    const [row, {messages}] = await Promise.all([api(`/api/chats/${encodeURIComponent(id)}`), api(`/api/chats/${encodeURIComponent(id)}/history?around=${messageId}`)]);
+    if (currentId !== id) return;
+    renderHead(row); renderAbout(row);
+    reading = {messages, target: messageId, canOlder: messages.length > 0, canNewer: messages.length > 0};
+    renderMessages();
+    $(`.msg[data-message-id="${messageId}"]`)?.scrollIntoView({block: 'center'});
+  } catch (error) { if (currentId === id) $('#messages').innerHTML = `<div class="history-note">${escapeHTML(error.message)}</div>`; }
 }
 async function openChat(id) {
-  currentId = id;
+  currentId = id; currentMatch = null;
   $('#placeholder').hidden = true; $('#chat-view').hidden = false; $('#app').classList.add('reading');
   document.querySelectorAll('.chat.current').forEach(node => node.classList.remove('current'));
   document.querySelector(`.chat[data-id="${CSS.escape(id)}"]`)?.classList.add('current');
@@ -200,16 +294,10 @@ async function openChat(id) {
   catch (error) { if (currentId === id) $('#messages').innerHTML = `<div class="history-note">${escapeHTML(error.message)}</div>`; return; }
   if (currentId !== id) return;
   renderHead(row); renderAbout(row);
-  let day = '', html = row.frequency_is_lower_bound ? `<div class="history-note">Показаны последние ${row.loaded_messages} сообщений. Полная история в Telegram.</div>` : '';
-  for (const message of row.messages) {
-    const key = dayKey(message.date);
-    if (key !== day) { day = key; html += `<div class="day">${dayLabel(message.date)}</div>`; }
-    html += messageMarkup(message);
-  }
+  reading = {messages: row.messages, target: null, canOlder: row.frequency_is_lower_bound && !row.demo, canNewer: false};
+  renderMessages();
   const box = $('#messages');
-  box.innerHTML = html || '<div class="history-note">Нет загруженных сообщений</div>';
   box.scrollTop = box.scrollHeight;
-  chatMedia.fill({root: box, chatId: id, request: api, isCurrent: () => currentId === id});
 }
 function toggleSelected(id, on) { if (on) selected.add(id); else selected.delete(id); }
 function applySmart(key) {
@@ -311,6 +399,10 @@ function searchMessages() {
 
 document.addEventListener('click', event => {
   const target = event.target;
+  const moreButton = target.closest('[data-history]');
+  if (moreButton) return loadMoreHistory(moreButton.dataset.history, moreButton);
+  const opener = target.closest('[data-open-chat]');
+  if (opener) return opener.dataset.message ? openChatAt(opener.dataset.openChat, Number(opener.dataset.message)) : openChat(opener.dataset.openChat);
   const folderButton = target.closest('[data-folder]');
   if (folderButton) { folder = folderButton.dataset.folder; return resetList(); }
   const kindButton = target.closest('[data-kind]');
@@ -356,7 +448,10 @@ $('#chats').addEventListener('change', event => {
 $('#chats').addEventListener('keydown', event => {
   if (event.target.matches('.chat') && event.key === 'Enter') { event.preventDefault(); openChat(event.target.dataset.id); }
 });
-$('#search').addEventListener('input', () => { searchMessages(); resetList(); });
+$('#search').addEventListener('input', () => { deep = null; currentMatch = null; searchMessages(); resetList(); });
+$('#search').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); runDeepSearch(); } });
+$('#deep-search-run').addEventListener('click', () => (deep ? closeDeep() : runDeepSearch()));
+$('#deep-search-private').addEventListener('change', () => { if (deep) { deep = null; runDeepSearch(); } });
 $('#color-mode').addEventListener('change', event => { colorMode = event.target.checked; renderList(); });
 $('#only-selected').addEventListener('click', () => { onlySelected = !onlySelected; resetList(); });
 $('#clear-selection').addEventListener('click', () => { selected.clear(); onlySelected = false; resetList(); });
@@ -369,4 +464,9 @@ new IntersectionObserver(entries => {
   const total = visibleRows().length;
   if (shown < total) { shown += PAGE; renderList(); }
 }, {root: $('#chats').parentElement}).observe($('#sentinel'));
-load().catch(error => toast(error.message, true));
+load().then(() => {
+  if (!params.get('search')) return;
+  $('#search').value = params.get('search');
+  searchMessages();
+  runDeepSearch();
+}).catch(error => toast(error.message, true));

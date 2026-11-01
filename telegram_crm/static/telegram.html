@@ -24,7 +24,11 @@
     </nav>
     <section class="list-pane" aria-label="Чаты">
       <div class="list-head">
-        <input id="search" type="search" placeholder="Поиск по чатам и сообщениям" aria-label="Поиск">
+        <input id="search" type="search" placeholder="Поиск. Enter — по всей истории Telegram" aria-label="Поиск">
+        <div id="deep-search" class="deep-search" hidden>
+          <button id="deep-search-run" type="button"></button>
+          <label><input id="deep-search-private" type="checkbox" checked>только личные</label>
+        </div>
         <div id="list-count" class="list-count"></div>
       </div>
       <div id="status" class="status" hidden></div>

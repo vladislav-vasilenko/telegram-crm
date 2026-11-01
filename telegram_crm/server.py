@@ -20,6 +20,7 @@ from .analysis import CATEGORIES, classify
 from .demo import load_demo
 from .chat_export import full_history, recent_text
 from .layout import fetch_layout
+from .search import history_window, search_history
 from .media import INLINE_TYPES, MediaService, attachment_header, describe, parse_range
 from .llm import PartsFailed, analyze_batch, create_batch, estimate, import_result, provider_for
 from .models import Annotation, AuthApp, CleanupRequest, AuthCode, AuthPassword, AuthStart, BatchRequest, ImportRequest, LLMKey, ScanRequest, Settings
@@ -261,6 +262,22 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
             raise ValueError("Подключите Telegram в веб-панели")
         return await media.client_and_peer(chat.id)
 
+    @app.get("/api/telegram/search")
+    async def telegram_search(q: str, private_only: bool = True):
+        """Whole-history search. It costs Telegram requests, so the page runs it on demand, not on every key."""
+        if len(q.strip()) < 2:
+            raise ValueError("Введите хотя бы 2 символа")
+        if not telegram.authorized:
+            raise ValueError("Подключите Telegram в веб-панели")
+        telegram.require_ready()
+        rows = {row["chat"].id: row["chat"] for row in store.all()}
+        return await search_history(await telegram.get_client(), q.strip(), rows, private_only)
+
+    @app.get("/api/chats/{chat_id}/history")
+    async def chat_history(chat_id: str, request: Request, around: int | None = None, before: int | None = None, after: int | None = None):
+        client, peer = await export_peer(media_chat(chat_id, request))
+        return {"messages": await history_window(client, peer, telegram.message, around, before, after)}
+
     @app.get("/api/chats/{chat_id}/export/info")
     async def export_info(chat_id: str, request: Request):
         client, peer = await export_peer(media_chat(chat_id, request))
@@ -282,8 +299,10 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
     async def media_info(chat_id: str, request: Request, ids: str = ""):
         chat = media_chat(chat_id, request)
         message_ids = [int(value) for value in ids.split(",") if value.isdigit()][:100]
-        if chat.demo or not message_ids or not telegram.authorized:
+        if chat.demo or not message_ids:
             return {"items": {}}
+        if not telegram.authorized:  # possibly still connecting after a start: the page tries again
+            return {"items": {}, "retry": True}
         return {"items": await media.info(chat_id, message_ids)}
 
     @app.get("/api/chats/{chat_id}/media/{message_id}/preview")
