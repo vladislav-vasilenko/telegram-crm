@@ -19,6 +19,7 @@ from telethon import errors
 from .analysis import CATEGORIES, classify
 from .demo import load_demo
 from .chat_export import full_history, recent_text
+from .companies import apply_companies, folder_index
 from .i18n import translate
 from .layout import fetch_layout
 from .romance import METADATA_KEY as ROMANCE_KEY, analyze_romance, apply_romance, estimate_romance, export_romance, import_romance
@@ -56,7 +57,9 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
     def analyzed_rows():
         settings = store.settings()
         saved, romance = store.metadata("triage", {}), store.metadata(ROMANCE_KEY, {})
-        return sorted([apply_romance(apply_triage(classify(**row, settings=settings), row["chat"], row["annotation"], saved), row["chat"], row["annotation"], romance)
+        folders = folder_index(store.metadata("telegram_layout"))
+        return sorted([apply_companies(apply_romance(apply_triage(classify(**row, settings=settings), row["chat"], row["annotation"], saved), row["chat"], row["annotation"], romance),
+                                       row["chat"], row["annotation"], folders)
                        for row in store.all()],
                       key=lambda r: (-r["priority_score"], r["title"].lower()))
 
@@ -347,8 +350,9 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
         row = store.get(chat_id)
         if not row:
             raise HTTPException(404, "Чат не найден")
-        return {**apply_romance(apply_triage(classify(**row, settings=store.settings()), row["chat"], row["annotation"], store.metadata("triage", {})),
-                                row["chat"], row["annotation"], store.metadata(ROMANCE_KEY, {})),
+        return {**apply_companies(apply_romance(apply_triage(classify(**row, settings=store.settings()), row["chat"], row["annotation"], store.metadata("triage", {})),
+                                                row["chat"], row["annotation"], store.metadata(ROMANCE_KEY, {})),
+                                  row["chat"], row["annotation"], folder_index(store.metadata("telegram_layout"))),
                 "messages": [m.model_dump(mode="json") for m in sorted(row["chat"].messages, key=lambda m: (m.date, m.id))]}
 
     @app.put("/api/chats/{chat_id}/annotation")

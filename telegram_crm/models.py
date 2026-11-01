@@ -34,6 +34,7 @@ class Annotation(StrictModel):
     important: bool | None = None
     dating: bool | None = None
     job: bool | None = None
+    company: Literal["none", "sber", "huawei", "yandex", "vk"] | None = None
     stage: Literal["new", "talking", "meeting_planned", "met", "kissed", "sex_protected", "sex_unprotected",
                    "regular_partner", "relationship", "closed"] = "new"
     last_progress_at: datetime | None = None

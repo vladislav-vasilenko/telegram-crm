@@ -302,7 +302,14 @@ window.I18N_EN = {
 "Основания:": "Evidence:",
 "Скопировать промпт": "Copy prompt",
 "Скопировать идею": "Copy idea",
-"Закрыть": "Close"
+"Закрыть": "Close",
+"КОМПАНИИ": "COMPANIES",
+"Возможно": "Possible",
+"Компания": "Company",
+"Определить автоматически": "Detect automatically",
+"Не относится": "Not related",
+"Компания?": "Company?",
+"Компании: возможно": "Companies: possible"
 },
 "fragments": {
 "Найти чат или текст. Enter — поиск по всей истории Telegram": "Find a chat or text. Enter searches all Telegram history",
@@ -753,7 +760,15 @@ window.I18N_EN = {
 "Без анализа": "Not analyzed",
 "Скопировать для LLM": "Copy for LLM",
 "В буфере личная переписка другого человека. Она уйдёт провайдеру, когда вы вставите её в LLM.": "The clipboard holds another person's private correspondence. It goes to the provider when you paste it into an LLM.",
-"Скопировано чатов:": "Chats copied:"
+"Скопировано чатов:": "Chats copied:",
+"VK / Mail.ru / Дзен": "VK / Mail.ru / Dzen",
+"Компании: возможно": "Companies: possible",
+"Компания:": "Company:",
+"Возможно, компания:": "Possibly a company:",
+"(ваша отметка)": "(your mark)",
+"(по названию чата)": "(from the chat title)",
+"(ваша папка Telegram)": "(your Telegram folder)",
+"(упоминания в сообщениях)": "(mentions in messages)"
 },
 "patterns": [
 [

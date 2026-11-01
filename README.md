@@ -41,6 +41,10 @@ Gender is never inferred from a name. “Acquaintance” from keywords or an LLM
 
 Keyword detection is built mainly for Russian. Jobs also recognizes common English terms, but romantic and scam rules recognize few English phrases, so an LLM helps more for English chats.
 
+## Companies
+
+Sber, Huawei, Yandex and VK (with Mail.ru and Dzen) are categories in both views. A chat joins one through its title, its username, or your own Telegram folder with that name (“Сбербанк”, “Яндекс”, “Huawei”). Chats that only mention a company go to “Companies: possible”, because adverts and link footers mention these companies too often. The **Company** field in the chat card sets the category by hand. Telegram folders change only through the folder plan (`CRM Sber` and others).
+
 ## Triage and links
 
 `python -m telegram_crm triage` (with the server stopped) sorts chats into “Delete first”, “Review manually” and “Keep”. A verdict is tied to the newest message: if a new one arrives, the chat goes to manual review. Triage itself deletes nothing.

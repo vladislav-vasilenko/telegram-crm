@@ -20,7 +20,7 @@ STATIC = Path(__file__).parent.parent / "telegram_crm" / "static"
 
 
 @pytest.mark.parametrize("text", [
-    *CATEGORIES.values(), *GROUPS.values(), *(item for bucket in BUCKETS.values() for item in bucket[1:]),
+    *(name for name in CATEGORIES.values() if CYRILLIC.search(name)), *GROUPS.values(), *(item for bucket in BUCKETS.values() for item in bucket[1:]),
     "Telegram запросил паузу 30 сек. Попробуйте позже.", "Подключите Telegram в веб-панели", "Обновление: чат 3 из 10",
     "Полное обновление: чат 3 из 10", "Обновлено чатов: 1964, запрошено у Telegram: 2", "Нет сообщений более 90 дней",
     "Последнее сообщение старше 5 календарных месяцев", "Нет сообщений более 2 лет", "Ультракороткий чат: всего 4 сообщ. за всю историю",

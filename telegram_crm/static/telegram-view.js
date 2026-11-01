@@ -85,8 +85,10 @@ function orderOf(row) {
   // Chats Telegram did not list go last, newest first.
   return index ?? 1e6 + (Date.now() - Date.parse(row.last_message_at || 0)) / 1e12;
 }
+const COMPANIES = {company_sber: 'Sber', company_huawei: 'Huawei', company_yandex: 'Yandex', company_vk: 'VK / Mail.ru / Дзен', company_maybe: 'Возможно'};
 function inFolder(row, key = folder) {
   if (key === 'archive') return row.archived;
+  if (COMPANIES[key]) return row.categories.includes(key);
   const custom = layout.folders.find(item => item.id === key && item.chats);
   if (custom) return custom.rank.has(row.id);
   return !layout.dialogs.length || !row.archived;
@@ -107,7 +109,7 @@ function applyLayout(next) {
     if (!dialog) return;
     Object.assign(row, {pinned: dialog.pinned, archived: dialog.archived, unread_count: dialog.unread, last_message: dialog.last_text, last_message_at: dialog.last_at, last_outgoing: dialog.last_outgoing});
   });
-  if (folder !== 'all' && folder !== 'archive' && !customFolder() && layout.folders.length) folder = 'all';
+  if (folder !== 'all' && folder !== 'archive' && !COMPANIES[folder] && !customFolder() && layout.folders.length) folder = 'all';
 }
 function searchHit(row, query) {
   if ([row.title, row.username, row.last_message, row.annotation.notes].some(x => (x || '').toLocaleLowerCase('ru').includes(query))) return '';
@@ -127,6 +129,7 @@ function renderRail() {
     : {id: 'all', label: 'Все чаты'});
   if (state.chats.some(row => row.archived)) folders.push({id: 'archive', label: 'Архив'});
   $('#folders').innerHTML = folders.map(item => `<button class="rail-item ${folder === item.id ? 'active' : ''}" data-folder="${escapeHTML(item.id)}" title="${escapeHTML(item.label)}" ${folder === item.id ? 'aria-current="true"' : ''}><b>${count(item.id)}</b><span>${escapeHTML(item.label)}</span></button>`).join('');
+  $('#companies').innerHTML = Object.entries(COMPANIES).map(([key, label]) => `<button class="rail-item ${folder === key ? 'active' : ''}" data-folder="${key}" ${folder === key ? 'aria-current="true"' : ''}><b>${count(key)}</b><span>${escapeHTML(label)}</span></button>`).join('');
   $('#kinds').innerHTML = Object.entries(KINDS).map(([key, label]) => {
     const total = state.chats.filter(row => inFolder(row) && (key === 'all' || row.kind === key)).length;
     return `<button class="rail-item ${kind === key ? 'active' : ''}" data-kind="${key}" ${kind === key ? 'aria-current="true"' : ''}><b>${total}</b><span>${label}</span></button>`;

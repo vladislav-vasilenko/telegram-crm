@@ -8,6 +8,7 @@ from datetime import timedelta
 from telethon import TelegramClient, errors, functions, types
 
 from .analysis import classify
+from .companies import apply_companies, folder_index
 from .layout import with_all_pins
 from .models import Chat, Message
 from .store import private_json, private_text, utcnow
@@ -510,10 +511,14 @@ class TelegramService:
         names = {"important": "CRM Важные", "job": "CRM Работа", "stalled": "CRM Зависло", "suspected_scam": "CRM Проверка",
                  "inactive": "CRM Неактив", "very_old": "CRM Старые", "dead": "CRM Мёртвые",
                  "spam": "CRM Спам", "short": "CRM Короткие"}
-        rows = [classify(**row, settings=self.store.settings()) for row in self.store.all() if not row["chat"].demo]
+        names.update(company_sber="CRM Sber", company_huawei="CRM Huawei", company_yandex="CRM Yandex", company_vk="CRM VK")
+        folders = folder_index(self.store.metadata("telegram_layout"))
+        rows = [apply_companies(classify(**row, settings=self.store.settings()), row["chat"], row["annotation"], folders)
+                for row in self.store.all() if not row["chat"].demo]
         if self.store.settings().language == "en":
             names = {"important": "CRM Important", "job": "CRM Jobs", "stalled": "CRM Stalled", "suspected_scam": "CRM Review",
-                     "inactive": "CRM Inactive", "very_old": "CRM Old", "dead": "CRM Dead", "spam": "CRM Spam", "short": "CRM Short"}
+                     "inactive": "CRM Inactive", "very_old": "CRM Old", "dead": "CRM Dead", "spam": "CRM Spam", "short": "CRM Short",
+                     "company_sber": "CRM Sber", "company_huawei": "CRM Huawei", "company_yandex": "CRM Yandex", "company_vk": "CRM VK"}
         return [{"category": key, "title": title, "chat_ids": [row["id"] for row in rows if key in row["categories"]]}
                 for key, title in names.items()]
 

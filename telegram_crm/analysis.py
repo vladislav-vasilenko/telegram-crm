@@ -20,6 +20,11 @@ CATEGORIES = {
     "very_old": "Очень старые",
     "dead": "Мёртвые",
     "short": "Ультракороткие",
+    "company_sber": "Sber",
+    "company_huawei": "Huawei",
+    "company_yandex": "Yandex",
+    "company_vk": "VK",
+    "company_maybe": "Компании: возможно",
     "active": "Остальные",
 }
 
