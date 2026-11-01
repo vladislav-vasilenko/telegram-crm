@@ -59,7 +59,7 @@ In the Telegram view, press Enter in the search box or click **Search all histor
 
 ## Romance review
 
-In the Telegram view, **Romance review** gathers romantic chats: the triage buckets, chats marked “Yes, an acquaintance” and chats detected by keywords. An LLM rates promise from 0 to 100, explains how the chat ended, and advises to write, wait or let it go. When it advises writing, it suggests an idea for a first message. You can start with a test on 5 chats. It works with an API key or by copying the prompt into your own LLM. Message text goes to the provider only after you confirm, and the app itself never sends messages.
+In the Telegram view, **Romance review** gathers romantic chats: the triage buckets, chats marked “Yes, an acquaintance” and chats detected by keywords. An LLM rates promise from 0 to 100, explains how the chat ended, and advises to write, wait or let it go. When it advises writing, it suggests an idea for a first message. You can start with a test on 5 chats. It works with an API key or with **Copy for LLM**, which copies up to 20 chats not analyzed yet with a ready prompt; load the reply through **Import reply**. Message text goes to the provider only after you confirm, and the app itself never sends messages.
 
 The advice to write is removed in code, whatever the model answers, if the other person said no or you already wrote 3 times in a row without a reply. This is an estimate from a fragment: the LLM cannot see meetings or calls outside Telegram.
 

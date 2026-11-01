@@ -750,7 +750,10 @@ window.I18N_EN = {
 "Подождать": "Wait",
 "Закрыть тему": "Let it go",
 "Неясно": "Unclear",
-"Без анализа": "Not analyzed"
+"Без анализа": "Not analyzed",
+"Скопировать для LLM": "Copy for LLM",
+"В буфере личная переписка другого человека. Она уйдёт провайдеру, когда вы вставите её в LLM.": "The clipboard holds another person's private correspondence. It goes to the provider when you paste it into an LLM.",
+"Скопировано чатов:": "Chats copied:"
 },
 "patterns": [
 [

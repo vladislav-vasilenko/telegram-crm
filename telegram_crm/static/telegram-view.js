@@ -215,6 +215,8 @@ const INTEREST_LABEL = {high: 'Взаимный интерес высокий', 
 const REC_ORDER = {write: 0, wait: 1, uncertain: 2, close: 3};
 const romanceRows = () => state.chats.filter(row => row.kind === 'user' && (row.romance_candidate || row.romance));
 const romanceOrder = (a, b) => REC_ORDER[a.romance.result.recommendation] - REC_ORDER[b.romance.result.recommendation] || b.romance.result.promise - a.romance.result.promise;
+// One paste stays small enough for an LLM chat window and for a complete JSON reply.
+const ROMANCE_COPY_LIMIT = 20;
 const needsRomance = () => romanceRows().filter(row => !row.romance || row.romance.stale).sort((a, b) => b.loaded_messages - a.loaded_messages);
 function romanceRowMarkup(row) {
   const r = row.romance?.result;
@@ -231,7 +233,7 @@ function renderRomance() {
   const closing = done.filter(row => row.romance.result.recommendation === 'close');
   $('#list-count').textContent = `Анализ романтики: ${chatsLabel(rows.length)}`;
   list.innerHTML = `<li class="romance-head"><div>Советы LLM по фрагменту переписки. Ничего не отправляется.</div>
-    <div class="romance-actions"><button class="primary" data-romance="sample" ${todo.length ? '' : 'disabled'}>Проверить на ${Math.min(5, todo.length)} чатах</button><button data-romance="rest" ${todo.length ? '' : 'disabled'}>Анализировать все (${todo.length})</button><button data-romance="import">Импорт ответа</button>${closing.length ? `<button data-romance="select-close">Выбрать «Закрыть тему» (${closing.length})</button>` : ''}</div>
+    <div class="romance-actions"><button class="primary" data-romance="sample" ${todo.length ? '' : 'disabled'}>Проверить на ${Math.min(5, todo.length)} чатах</button><button data-romance="rest" ${todo.length ? '' : 'disabled'}>Анализировать все (${todo.length})</button><button data-romance="copy" ${todo.length ? '' : 'disabled'}>Скопировать для LLM (${Math.min(ROMANCE_COPY_LIMIT, todo.length)})</button><button data-romance="import">Импорт ответа</button>${closing.length ? `<button data-romance="select-close">Выбрать «Закрыть тему» (${closing.length})</button>` : ''}</div>
     <div class="romance-filters">${filters.map(([key, label, total]) => `<button data-romance-filter="${key}" class="${romanceFilter === key ? 'active' : ''}">${label} ${total}</button>`).join('')}</div></li>
     ${shownRows.length ? shownRows.map(romanceRowMarkup).join('') : '<li class="empty">Здесь пока пусто</li>'}`;
 }
@@ -265,6 +267,16 @@ function openRomanceImport(batchId = '') {
   $('#romance-body').innerHTML = `<p>Вставьте JSON-ответ вашей LLM. Он проверяется по ID чатов и сообщений.</p><label>Идентификатор пачки<input id="romance-batch" value="${escapeHTML(batchId)}"></label><textarea id="romance-json" placeholder='{"results": [...]}'></textarea><div class="dialog-actions"><button class="action" data-romance-action="cancel">Отмена</button><button class="action primary" data-romance-action="import">Проверить и импортировать</button></div>`;
   if (!$('#romance-dialog').open) $('#romance-dialog').showModal();
 }
+async function copyRomance(ids) {
+  const dialog = $('#romance-dialog'), body = $('#romance-body');
+  const exported = await api('/api/romance/export', {method: 'POST', body: JSON.stringify(romanceRequest(ids))});
+  body.innerHTML = `<p class="warning">В буфере личная переписка другого человека. Она уйдёт провайдеру, когда вы вставите её в LLM.</p><p>Вставьте в выбранную LLM. Затем скопируйте её JSON-ответ и импортируйте здесь.</p><textarea id="romance-prompt" readonly></textarea><div class="dialog-actions"><button class="action" data-romance-action="cancel">Закрыть</button><button class="action primary" data-romance-action="to-import">Импорт ответа</button></div>`;
+  $('#romance-prompt').value = exported.prompt;
+  body.dataset.batch = exported.batch_id;
+  try { localStorage.setItem('tg-crm-romance-batch', exported.batch_id); } catch { /* the ID stays on screen */ }
+  if (!dialog.open) dialog.showModal();
+  try { await navigator.clipboard.writeText(exported.prompt); toast(`Скопировано чатов: ${exported.count}`); } catch { $('#romance-prompt').select(); toast('Выделите и скопируйте текст вручную'); }
+}
 async function romanceAction(kind) {
   const dialog = $('#romance-dialog'), body = $('#romance-body');
   if (kind === 'cancel') return dialog.close();
@@ -273,12 +285,7 @@ async function romanceAction(kind) {
       await api('/api/romance/analyze', {method: 'POST', body: JSON.stringify(romanceRequest(JSON.parse(body.dataset.ids)))});
       dialog.close(); toast('Анализ LLM запущен'); watchRomance();
     } else if (kind === 'copy') {
-      const exported = await api('/api/romance/export', {method: 'POST', body: JSON.stringify(romanceRequest(JSON.parse(body.dataset.ids)))});
-      body.innerHTML = `<p>Вставьте в выбранную LLM. Затем скопируйте её JSON-ответ и импортируйте здесь.</p><textarea id="romance-prompt" readonly></textarea><div class="dialog-actions"><button class="action" data-romance-action="cancel">Закрыть</button><button class="action primary" data-romance-action="to-import">Импорт ответа</button></div>`;
-      $('#romance-prompt').value = exported.prompt;
-      body.dataset.batch = exported.batch_id;
-      try { localStorage.setItem('tg-crm-romance-batch', exported.batch_id); } catch { /* the ID stays on screen */ }
-      try { await navigator.clipboard.writeText(exported.prompt); toast('Пачка скопирована'); } catch { $('#romance-prompt').select(); toast('Выделите и скопируйте текст вручную'); }
+      await copyRomance(JSON.parse(body.dataset.ids));
     } else if (kind === 'to-import') {
       openRomanceImport(body.dataset.batch);
     } else if (kind === 'import') {
@@ -505,6 +512,7 @@ document.addEventListener('click', event => {
     const kind = romanceButton.dataset.romance, todo = needsRomance().map(row => row.id);
     if (kind === 'sample') return openRomanceRun(todo.slice(0, 5));
     if (kind === 'rest') return openRomanceRun(todo);
+    if (kind === 'copy') return copyRomance(todo.slice(0, ROMANCE_COPY_LIMIT)).catch(error => toast(error.message, true));
     if (kind === 'import') { let batch = ''; try { batch = localStorage.getItem('tg-crm-romance-batch') || ''; } catch { /* typed by hand */ } return openRomanceImport(batch); }
     if (kind === 'select-close') { romanceRows().filter(row => row.romance?.result.recommendation === 'close').forEach(row => selected.add(row.id)); return renderTools(); }
   }
