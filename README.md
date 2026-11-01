@@ -1,118 +1,119 @@
-# Диалоги — Telegram CRM
+# Dialogues: Telegram CRM
 
-[English version](README.en.md)
+[Русская версия](README.ru.md)
 
-Локальное приложение для разбора Telegram на Telethon 1.45 / MTProto с веб-панелью на русском и английском языках. Язык переключается кнопкой **English / Русский** в боковой панели.
+A local app for sorting out your Telegram, built on Telethon 1.45 / MTProto, with a web panel in English and Russian. Switch the language with **English / Русский** in the sidebar.
 
-Проект: `/Users/vladmac/Documents/ChatGPT/telegram-crm`. Панель: http://127.0.0.1:4180.
+Setup, including creating API_ID and API_HASH, is in [SETUP.en.md](SETUP.en.md).
 
-## Быстрый запуск
+## Quick start
 
-Нажмите **Telegram CRM** в Dock. Приложение запускает сервер и открывает панель в браузере. Повторный запуск использует уже работающий сервис.
+Click **Telegram CRM** in the Dock. The app starts the server and opens the panel at http://127.0.0.1:4180. Running it again reuses the service that is already running.
 
-Первое подключение и создание API_ID / API_HASH подробно описаны в [SETUP.md](SETUP.md). Доступен вход по QR: на телефоне Telegram → Настройки → Устройства → Подключить устройство. Если код не приходит, используйте этот способ.
-
-В самой панели инструкция доступна через **Настройки → Инструкция по API**. Для личной истории используется вход по номеру, а не токен BotFather.
-
-Для запуска из терминала:
+From a terminal:
 
 ```bash
-cd /Users/vladmac/Documents/ChatGPT/telegram-crm
 .venv/bin/python -m telegram_crm
 ```
 
-Если окружения ещё нет, нужны Python 3.11+ и установка:
+If there is no environment yet, you need Python 3.11+ and:
 
 ```bash
 uv venv --python 3.12
 uv pip install -e '.[test]'
 ```
 
-## Что делает приложение
+## What the app does
 
-| Категория | Правило по умолчанию |
+| Category | Default rule |
 | --- | --- |
-| Важные | Взаимное общение: ≥20 сообщений за последние 30 дней, минимум 2 входящих и 2 исходящих; также закрепления, ручные отметки и уверенные рекомендации LLM |
-| Работа | Слова о вакансиях, собеседованиях и найме в сообщениях или названии чата; в группах, каналах и ботах нужно минимум 3 таких сообщения и не менее 10% загруженных. Можно подтвердить или отменить вручную |
-| Знакомства без развития | Более 21 дня с последнего сообщения или вручную указанного прогресса; этапы «Встретились» и все последующие, включая «Отношения» и «Завершено», исключаются |
-| Подозрительные | SCAM/FAKE Telegram, входящие запросы кодов/паролей, рискованные предоплаты, поддельные домены Telegram, рекомендации LLM |
-| Неактивные | Более 90 дней без сообщений |
-| Очень старые | Последнее сообщение раньше границы 5 календарных месяцев |
-| Мёртвые | Последнее сообщение раньше границы 2 календарных лет |
+| Important | Two-way chat: at least 20 messages in the last 30 days, with at least 2 incoming and 2 outgoing; also pins, manual marks and confident LLM recommendations |
+| Jobs | Words about vacancies, interviews and hiring in messages or the chat title; groups, channels and bots need at least 3 such messages, making up at least 10% of those loaded. You can confirm or cancel this by hand |
+| Stalled acquaintances | More than 21 days since the last message or manually set progress; the stage “Met” and every later stage are excluded |
+| Suspicious | Telegram's SCAM/FAKE label, incoming requests for codes or passwords, risky prepayments, fake Telegram domains, LLM recommendations |
+| Inactive | More than 90 days without messages |
+| Very old | Last message before the 5-calendar-month boundary |
+| Dead | Last message before the 2-calendar-year boundary |
 
-Пороги меняются в настройках. Категории пересекаются. В списке по умолчанию сверху чаты, где вы сами писали больше всего за 30 дней; затем общее число сообщений и сигналы важности. Категория «Важные» по-прежнему считает обе стороны переписки. Частота считается по загруженным сообщениям: по умолчанию до 100 на чат; знак `+` указывает, что это может быть нижняя оценка. При необходимости увеличьте глубину до 500.
+You can change the thresholds in settings, and categories can overlap. By default, the list shows the chats you wrote to most in the last 30 days first, then total messages and importance signals. Frequency is counted from loaded messages, up to 100 per chat by default; a `+` means it may be an undercount. You can raise the depth to 500.
 
-Пол по имени не определяется. Знакомство по словам или LLM — предположение; его можно подтвердить или отменить. «Мошенничество» — сигнал для проверки, а не доказанный факт. Пересланные предупреждения и собственные сообщения исключаются из текстовых правил риска. Анализ ограничен доступным фрагментом истории, медиа не расшифровываются.
+Gender is never inferred from a name. “Acquaintance” from keywords or an LLM is a guess that you can confirm or cancel. “Scam” is a signal to check, not a proven fact. Forwarded warnings and your own messages are excluded from the text risk rules. Analysis is limited to the available part of the history, and media is not transcribed.
 
-## Разбор и ссылки
+Keyword detection is built mainly for Russian. Jobs also recognizes common English terms, but romantic and scam rules recognize few English phrases, so an LLM helps more for English chats.
 
-`python -m telegram_crm triage` (при остановленном сервере) раскладывает чаты на «Удалить сначала», «Проверить вручную» и «Оставить». Вердикт привязан к последнему сообщению: если появилось новое, чат уходит на ручную проверку. Сам разбор ничего не удаляет.
+## Triage and links
 
-Панель открывается со ссылок: `/?triage=remove&select=all` (группа с выбранными чатами), `/?triage=review_romantic_old` (одна корзина), `/?category=job&kind=channel&sort=oldest&q=текст`.
+`python -m telegram_crm triage` (with the server stopped) sorts chats into “Delete first”, “Review manually” and “Keep”. A verdict is tied to the newest message: if a new one arrives, the chat goes to manual review. Triage itself deletes nothing.
 
-## Вид Telegram
+The panel opens from links: `/?triage=remove&select=all` (a group with its chats selected), `/?triage=review_romantic_old` (one bucket), `/?category=job&kind=channel&sort=oldest&q=text`.
 
-`/telegram` показывает чаты в привычном двухпанельном виде: при открытии порядок, закрепления, архив и ваши папки запрашиваются у Telegram (запросы только к списку диалогов, не чаще раза в 30 секунд), а текст чатов берётся из последнего сканирования. Слева папки, тип и сортировка, справа подсветка цветами и умное выделение. Цвета: зелёный — оставить, жёлтый — проверить, красный — под удаление, бордовый — крайне рекомендуется удалить (пустые чаты, удалённые аккаунты, метка SCAM, взрослые боты, боты и каналы без активности 2+ года). Удаление идёт через то же окно очистки с резервной копией. Ссылки: `/telegram?color=crimson,red&kind=bot&select=all` (параметры также `sort`, `dir`).
+## Telegram view
 
-## Поиск по всей истории
+`/telegram` shows chats in the familiar two-pane layout. On opening, the order, pins, archive and your folders are requested from Telegram (dialog list requests only, at most once every 30 seconds), while chat text comes from the last scan. Folders, type and sorting are on the left; color highlighting and smart selection are on the right.
 
-В виде Telegram нажмите Enter в поиске или кнопку «Искать по всей истории». Запрос уходит в Telegram (`messages.searchGlobal`), поэтому находятся и сообщения старше загруженных. Вся фраза и каждое значимое слово ищутся отдельно, а сверху показываются сообщения и чаты, где совпало больше слов. По умолчанию ищутся только личные чаты. Клик по результату открывает сообщение с окружением из Telegram, дальше можно листать кнопками «Загрузить раньше» и «Загрузить позже». Enter в поиске обычной панели открывает этот же поиск.
+Colors: green means keep, yellow means review, red means to delete, and crimson means strongly recommended to delete (empty chats, deleted accounts, the SCAM label, adult bots, and bots and channels inactive for 2+ years). Removal uses the same cleanup dialog with a backup. Links: `/telegram?color=crimson,red&kind=bot&select=all` (also `sort`, `dir`).
 
-## Анализ романтики
+## Search all history
 
-В виде Telegram кнопка «Анализ романтики» собирает романтические чаты: корзины разбора, чаты с отметкой «Да, знакомство» и найденные по словам. LLM оценивает перспективность от 0 до 100, причину обрыва и советует написать, подождать или закрыть тему. Для совета написать она предлагает идею первого сообщения. Можно начать с проверки на 5 чатах. Работает через API-ключ или кнопкой «Скопировать для LLM»: она копирует до 20 ещё не проанализированных чатов с готовым промптом, а ответ загружается через «Импорт ответа». Текст сообщений уходит провайдеру только после вашего подтверждения, сами сообщения приложение не отправляет.
+In the Telegram view, press Enter in the search box or click **Search all history**. The query goes to Telegram (`messages.searchGlobal`), so it finds messages older than those loaded. The whole phrase and each meaningful word are searched separately, and messages and chats matching more words come first. Only private chats are searched by default. Clicking a result opens the message with its surroundings from Telegram; use **Load earlier** and **Load later** to read on. Enter in the regular panel's search opens the same search.
 
-Совет написать снимается в коде независимо от ответа модели, если собеседник отказал или вы уже написали 3 раза подряд без ответа. Это оценка по фрагменту: встречи и звонки вне Telegram LLM не видит.
+## Romance review
 
-## Выгрузка чата
+In the Telegram view, **Romance review** gathers romantic chats: the triage buckets, chats marked “Yes, an acquaintance” and chats detected by keywords. An LLM rates promise from 0 to 100, explains how the chat ended, and advises to write, wait or let it go. When it advises writing, it suggests an idea for a first message. You can start with a test on 5 chats. It works with an API key or with **Copy for LLM**, which copies up to 20 chats not analyzed yet with a ready prompt; load the reply through **Import reply**. Message text goes to the provider only after you confirm, and the app itself never sends messages.
 
-В карточке чата и в виде Telegram есть две кнопки. «Выгрузить 100 сообщений» сразу отдаёт TXT из локальной базы, поэтому самых новых сообщений может не быть. «Выгрузить всю историю» читает чат из Telegram потоком, от старых к новым, не помечая его прочитанным. Если Telegram прервёт загрузку, в конце файла будет пометка «ВЫГРУЗКА НЕПОЛНАЯ». Вложения не сохраняются, указан только их тип.
+The advice to write is removed in code, whatever the model answers, if the other person said no or you already wrote 3 times in a row without a reply. This is an estimate from a fragment: the LLM cannot see meetings or calls outside Telegram.
 
-Там же есть кнопка удаления одного чата («Удалить чат», «Отписаться» или «Выйти из группы»). Она открывает обычное окно очистки с подтверждением и резервной копией.
+## Exporting a chat
 
-## Фото и видео
+The chat card and the Telegram view have two buttons. **Export 100 messages** gives you a TXT file from the local database right away, so the newest messages may be missing. **Export all history** streams the chat from Telegram, oldest first, without marking it as read. If Telegram interrupts the download, the file ends with “EXPORT INCOMPLETE”. Attachments are not saved, only their type is listed.
 
-Вложения не загружаются при сканировании. При открытии карточки чата панель получает их список, превью и фото загружаются по мере прокрутки, а видео и аудио идут потоком только после нажатия Play. Превью и фото кэшируются в `.data/media-cache` (до 1 ГБ, удаляются вместе с чатом), потоковые файлы на диск не пишутся. Самоуничтожающиеся вложения не открываются. В браузере показываются только типы из белого списка, остальные файлы скачиваются.
+The same place has a button to remove one chat (**Delete chat**, **Leave channel** or **Leave group**). It opens the regular cleanup dialog with confirmation and a backup.
 
-## Работа с LLM
+## Photos and videos
 
-1. Выберите чаты флажками или нажмите **Выбрать остальные для LLM**. «Остальные» — ещё не важные и без свежего анализа.
-2. Нажмите **Копировать для LLM**: для каждого чата берутся последние сообщения (по умолчанию 50, меняется в настройках), с датами и направлением. Готовый промпт и схема JSON входят в копируемый текст.
-3. Вставьте пачку в свою LLM. Затем **Импорт ответа** и вставьте JSON. Внешние chat_id — псевдонимы, сопоставление хранится локально 7 дней.
-4. Для анализа внутри сервиса: в **Настройках** вставьте ключ OpenAI или Anthropic и задайте доступную вашему API-аккаунту модель, сохраните. После выбора чатов нажмите **Анализ LLM**: панель покажет оценку объёма и стоимости. Запросы идут по 15 чатов, до 3 одновременно; это платные API-запросы.
+Attachments are not downloaded during a scan. When a chat card opens, the panel gets a list of them, previews and photos load as you scroll, and video and audio stream only after you press Play. Previews and photos are cached in `.data/media-cache` (up to 1 GB, removed along with the chat); streamed files are not written to disk. Self-destructing attachments are never opened. The browser only displays allowlisted types; other files are downloaded.
 
-Модели с названием `claude-*` работают через Anthropic API, остальные через OpenAI Responses API с `store=False`. Оба варианта используют структурированные ответы. По умолчанию модель — `gpt-6-luna`; доступность зависит от вашего API-аккаунта. Подписки ChatGPT и Claude не заменяют API-ключ. До настройки ключа и запуска API-анализа внешних запросов к LLM нет. Автоматическая отправка остальных чатов после сканирования включается отдельным переключателем с настраиваемым лимитом чатов.
+## Working with an LLM
 
-По умолчанию заголовки заменяются на «Чат N», телефоны/email/@username в тексте скрываются. Это не полная анонимизация: другие личные сведения могут оставаться в содержимом. Результаты проверяются по ID и ссылкам на сообщения; изменившаяся история требует новой пачки. Ручные пометки имеют приоритет, а устаревшие рекомендации LLM не влияют на категории.
+1. Select chats with the checkboxes or click **Select the rest for LLM**. “The rest” means chats that are not important yet and have no fresh analysis.
+2. Click **Copy for LLM**. For each chat this takes the latest messages (50 by default, adjustable in settings), with dates and direction. The ready prompt and JSON schema are included.
+3. Paste the batch into your LLM. Then click **Import reply** and paste the JSON. External chat_ids are aliases, and the mapping is kept locally for 7 days.
+4. To analyze inside the app, paste an OpenAI or Anthropic key in **Settings**, set a model available to your API account and save. After selecting chats, click **LLM analysis**: the panel shows an estimate of volume and cost. Requests go in parts of 15 chats, up to 3 at once. These are paid API requests.
 
-## Автоматизация и папки
+Models named `claude-*` use the Anthropic API; others use the OpenAI Responses API with `store=False`. Both use structured output. The default model is `gpt-6-luna`; availability depends on your API account. ChatGPT and Claude subscriptions do not replace an API key. No LLM requests are made until you set a key and start an API analysis. Automatic sending of the remaining chats after a scan has its own switch and a configurable chat limit.
 
-Настройте **Обновлять каждые N часов**. Сервер продолжает работать после закрытия браузера. Mac должен быть включён и иметь доступ к Telegram; сканирование всех чатов может занять минуты. Учитывается архив. При новых сообщениях история обновляется; неизменившиеся чаты используют локальный кэш. FloodWait останавливает сканирование с сохранением частичного результата и выдерживает паузу. Следующая попытка расписания — не чаще раза в 15 минут при ошибках.
+The prompt follows the interface language. In English, the instructions and labels sent to the LLM are English; message text is sent as written.
 
-**Папки Telegram** показывает конкретный план. По нажатию создаются/обновляются папки CRM. Папки других приложений не изменяются. При ограничениях Telegram большие списки не обрезаются; возможен частичный результат нескольких папок. Пустые категории пропускаются, ранее созданные папки при опустении сохраняют прежнее содержимое. Перед применением снова проверьте план. Синтетические демо-чаты никогда не попадают в Telegram.
+By default, titles become “Chat N”, and phones, emails and @usernames in the text are hidden. This is not full anonymization: other personal details can remain in the content. Results are checked against IDs and message references, and a changed history needs a new batch. Manual marks take priority, and outdated LLM recommendations do not affect categories.
 
-Сервис читает историю без отметки о прочтении. Черновики сохраняются локально и копируются вручную. Сообщения не отправляются, аккаунты не блокируются. Чаты удаляются или покидаются только через окно очистки после вашего подтверждения.
+## Automation and folders
 
-Команды:
+Set **Refresh every N hours**. The server keeps running after you close the browser. The Mac must be on and able to reach Telegram; scanning all chats can take minutes. The archive is included. New messages update the history; unchanged chats use the local cache. FloodWait stops a scan, keeps the partial result and observes the pause. After errors, the next scheduled attempt happens no more often than every 15 minutes.
+
+**Telegram folders** shows the exact plan. Applying it creates or updates the CRM folders, using names in the current language; folders from other apps are not changed. Large lists are not cut to fit Telegram's limits, so a result across several folders may be partial. Empty categories are skipped, and existing folders that become empty keep their previous content. Check the plan again before applying. Demo chats never reach Telegram.
+
+The service reads history without marking it as read. Drafts are saved locally and copied by hand. Messages are never sent. Chats are removed or left only through the cleanup dialog after you confirm, and accounts are never blocked.
+
+Commands:
 
 ```bash
-.venv/bin/python -m telegram_crm report                  # JSON в stdout
-.venv/bin/python -m telegram_crm folders                 # только план
-.venv/bin/python -m telegram_crm folders --apply         # применить папки
-.venv/bin/python -m telegram_crm scan                    # однократное обновление
-.venv/bin/python scripts/service.py status              # состояние
-.venv/bin/python scripts/service.py stop                # остановка запущенного ярлыком сервера
-.venv/bin/python scripts/install_macos_app.py            # переустановить ярлык и добавить в Dock
+.venv/bin/python -m telegram_crm report                  # JSON to stdout
+.venv/bin/python -m telegram_crm folders                 # plan only
+.venv/bin/python -m telegram_crm folders --apply         # apply folders
+.venv/bin/python -m telegram_crm scan                    # one refresh
+.venv/bin/python scripts/service.py status               # status
+.venv/bin/python scripts/service.py stop                 # stop the server started by the shortcut
+.venv/bin/python scripts/install_macos_app.py            # reinstall the shortcut and add it to the Dock
 ```
 
-CLI scan / folders --apply выполняйте при остановленном веб-сервисе: сессия Telethon должна иметь одного владельца. Демо доступно кнопкой в пустой панели; демо не смешивается с настоящими данными. Экспорт CSV доступен в шапке.
+Run CLI `scan` and `folders --apply` with the web service stopped: a Telethon session must have one owner. The demo is available from a button in the empty panel, and it never mixes with real data. CSV export is in the header. Demo chats are in Russian in both languages.
 
-## Хранение и проверка
+## Storage and checks
 
-`.data/credentials.json`: API_ID, API_HASH и необязательные ключи LLM. `.data/telegram.session`: сессия Telegram. `.data/crm.sqlite3`: локальная история, пометки, пачки и результаты LLM. Каталог имеет права `700`, файлы секретов `600`. Хранение локальное, без шифрования базы на уровне приложения. Секреты не возвращаются API, папка `.data` исключена из Git. Доступ к панели только через loopback, изменения защищены токеном и проверкой Origin.
+`.data/credentials.json`: API_ID, API_HASH and optional LLM keys. `.data/telegram.session`: the Telegram session. `.data/crm.sqlite3`: local history, marks, batches and LLM results. The folder has `700` permissions and secret files `600`. Storage is local, and the database is not encrypted by the app. The API does not return secrets, and `.data` is excluded from Git. The panel is reachable through loopback only, and changes are protected by a token and an Origin check.
 
 ```bash
 .venv/bin/python -m pytest -q
 ```
 
-Документация: [Telethon](https://docs.telethon.dev/en/stable/basic/signing-in.html), [Telegram API_ID](https://core.telegram.org/api/obtaining_api_id), [OpenAI Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs).
+Documentation: [Telethon](https://docs.telethon.dev/en/stable/basic/signing-in.html), [Telegram API_ID](https://core.telegram.org/api/obtaining_api_id), [OpenAI Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs).
