@@ -407,7 +407,10 @@ def create_app(data_dir: Path, *, demo=False, testing=False):
 
     @app.post("/api/auth/qr")
     async def auth_qr(request: AuthApp | None = None):
-        return await telegram.begin_qr(request)
+        try:
+            return await telegram.begin_qr(request)
+        except (ConnectionError, TimeoutError):
+            raise HTTPException(503, "Telegram не ответил на запрос QR. Проверьте соединение и повторите вход.") from None
 
     @app.get("/api/auth/qr/status")
     async def qr_status(request: Request):

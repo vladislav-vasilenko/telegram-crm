@@ -24,6 +24,9 @@ FULL_REFRESH_AFTER = timedelta(days=7)
 # Cleanup: every chat's full text history is saved locally before it is touched.
 BACKUP_MAX_MESSAGES = 20_000
 CLEANUP_DELAY = 1.0
+SESSION_REJECTED = (errors.AuthKeyUnregisteredError, errors.AuthKeyInvalidError,
+                    errors.AuthKeyDuplicatedError, errors.SessionExpiredError, errors.SessionRevokedError)
+RECONNECT_MESSAGE = "Telegram отклонил сохранённую сессию. Подключите аккаунт заново по QR."
 
 
 class TelegramService:
@@ -66,13 +69,33 @@ class TelegramService:
         async with self.lock:
             try:
                 client = await self.get_client()
-                if await client.is_user_authorized():
-                    await self.set_authorized()
+                # is_user_authorized() hides RPC errors and may reuse a cached answer.
+                await client(functions.updates.GetStateRequest())
+                await self.set_authorized()
+            except SESSION_REJECTED:
+                if self.store.metadata("telegram_account_id") is not None:
+                    await self.invalidate_session()
             except (ValueError, OSError, errors.RPCError):
                 self.status["message"] = "Не удалось восстановить подключение. Проверьте сеть и войдите повторно."
 
+    async def invalidate_session(self):
+        """Discard a rejected authorization key while holding the service lock."""
+        self.authorized, self.account, self.auth_step = False, None, "phone"
+        self.phone, self.phone_code_hash, self.delivery = None, None, None
+        self.qr_image = None
+        self.status.update(message="Требуется вход в Telegram", error=RECONNECT_MESSAGE)
+        client, self.client = self.client, None
+        if client:
+            await client.disconnect()
+            # Clear only the rejected MTProto key. A new login will generate a fresh key.
+            client.session.auth_key = None
+            client.session.close()
+
     async def set_authorized(self):
         me = await self.client.get_me()
+        if me is None:
+            await self.invalidate_session()
+            raise ValueError(RECONNECT_MESSAGE)
         if me.bot:
             raise ValueError("Нужен личный аккаунт Telegram, бот не может читать вашу переписку")
         previous = self.store.metadata("telegram_account_id")
@@ -86,6 +109,8 @@ class TelegramService:
         self.auth_step = "done"
         self.phone, self.phone_code_hash = None, None
         self.qr_image = None
+        if self.status["error"] == RECONNECT_MESSAGE:
+            self.status.update(message="Telegram подключён", error=None)
 
     async def begin_auth(self, request):
         await self.cancel_qr()
@@ -203,6 +228,10 @@ class TelegramService:
             self.auth_step = "phone"
         except errors.SessionPasswordNeededError:
             self.auth_step = "password"
+        except SESSION_REJECTED:
+            async with self.lock:
+                await self.invalidate_session()
+            self.qr_error = RECONNECT_MESSAGE
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -297,6 +326,8 @@ class TelegramService:
                 await asyncio.sleep(error.seconds + 1)
                 self.status["message"] = previous
                 continue
+            except SESSION_REJECTED:
+                raise
             except (errors.RPCError, ValueError):
                 status = "unavailable" if not messages else "limited"
             await asyncio.sleep(self.history_delay)
@@ -355,6 +386,8 @@ class TelegramService:
                     self.status["done"] = index + 1
                 self.store.finish_scan(scan_id)
                 self.status["message"] = f"Обновлено чатов: {len(dialogs)}, запрошено у Telegram: {fetched}"
+            except SESSION_REJECTED:
+                await self.invalidate_session()
             except errors.FloodWaitError as error:
                 until = utcnow() + timedelta(seconds=error.seconds + 1)
                 self.store.set_metadata("telegram_cooldown_until", until.isoformat())

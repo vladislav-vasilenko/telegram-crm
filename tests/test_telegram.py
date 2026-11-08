@@ -4,12 +4,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 from telethon import errors, functions, types
+from telethon.crypto import AuthKey
+from telethon.sessions import SQLiteSession
 
 from telegram_crm.models import Chat, Message, Settings
 from telegram_crm.store import Store, utcnow
 from datetime import timedelta
 
-from telegram_crm.telegram import FULL_REFRESH_AFTER, HISTORY_DELAY_MIN, TelegramService
+from telegram_crm.telegram import FULL_REFRESH_AFTER, HISTORY_DELAY_MIN, RECONNECT_MESSAGE, TelegramService
 
 
 def test_scan_reads_without_marking_read_or_sending(tmp_path, monkeypatch):
@@ -117,6 +119,45 @@ class HistoryClient:
 
 def scanned(store):
     return [m.text for m in store.get('7')['chat'].messages]
+
+
+@pytest.mark.parametrize("during_history", [False, True])
+def test_scan_rejected_session_preserves_saved_chats(tmp_path, during_history):
+    class RejectedClient(HistoryClient):
+        async def iter_dialogs(self, **kwargs):
+            if not during_history:
+                raise errors.AuthKeyUnregisteredError(request=None)
+            yield self.dialog()
+
+        async def iter_messages(self, *args, **kwargs):
+            raise errors.SessionRevokedError(request=None)
+            yield  # iter_messages is an async generator.
+
+    store = Store(tmp_path)
+    store.upsert(Chat(id="7", title="Чат", messages=[Message(id=1, date=utcnow(), outgoing=False, text="Сохранено")]))
+    store.set_metadata("telegram_account_id", 123)
+    session_path = str(tmp_path / "telegram")
+    client = RejectedClient(["Новое сообщение"])
+    client.session = SQLiteSession(session_path)
+    client.session.auth_key = AuthKey(data=b"x" * 256)
+    client.session.save()
+    client.disconnect = AsyncMock(side_effect=client.session.close)
+    service = TelegramService(store)
+    service.authorized, service.auth_step, service.client = True, "done", client
+    service.get_client = AsyncMock(return_value=client)
+
+    asyncio.run(service.scan())
+
+    assert service.auth_step == "phone" and not service.authorized
+    assert service.status["error"] == RECONNECT_MESSAGE
+    assert store.get("7")["chat"].messages[0].text == "Сохранено"
+    assert store.metadata("telegram_account_id") == 123
+    assert not store.metadata("last_scan_at")
+    client.disconnect.assert_awaited_once()
+    reopened = SQLiteSession(session_path)
+    assert not reopened.auth_key
+    reopened.close()
+    store.close()
 
 
 def test_incremental_scan_fetches_only_new_messages(tmp_path,monkeypatch):

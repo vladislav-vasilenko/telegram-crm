@@ -101,6 +101,8 @@ window.I18N_EN = {
 "Начнём с ваших диалогов": "Let's start with your chats",
 "Посмотреть демо": "View the demo",
 "Telegram подключён": "Telegram connected",
+"Telegram отклонил сохранённую сессию. Подключите аккаунт заново по QR.": "Telegram rejected the saved session. Sign in again with a QR code.",
+"Telegram не ответил на запрос QR. Проверьте соединение и повторите вход.": "Telegram did not respond to the QR request. Check your connection and try again.",
 "Демонстрационный режим": "Demo mode",
 "Демонстрационный режим.": "Demo mode.",
 "Аккаунт подключён": "Account connected",

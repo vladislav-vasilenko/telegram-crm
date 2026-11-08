@@ -193,7 +193,8 @@ function render() {
   const scan = state.scan, llm = state.llm_job;
   $('#scan-button').disabled = scan.running;
   $('#full-scan-button').disabled = scan.running || !state.telegram.authorized;
-  $('#scan-button').innerHTML = `${icon('refresh')}${scan.running ? 'Выполняется…' : 'Обновить чаты'}`;
+  const scanLabel = state.telegram.authorized ? 'Обновить чаты' : 'Подключить Telegram';
+  $('#scan-button').innerHTML = `${icon('refresh')}${scan.running ? 'Выполняется…' : scanLabel}`;
   const job = $('#job-status'); job.hidden = !(scan.running || llm.running || scan.error || llm.error);
   job.classList.toggle('error', !!(scan.error || llm.error));
   if (!job.hidden) job.innerHTML = `<span>${escapeHTML(scan.error || llm.error || (scan.running ? `${scan.message} · ${scan.done}/${scan.total || '…'}` : `LLM: проанализировано ${llm.done} из ${llm.total}`))}</span>${scan.running ? '<button data-action="cancel-scan">Остановить</button>' : ''}`;
